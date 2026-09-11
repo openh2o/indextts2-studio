@@ -595,6 +595,8 @@ cancelBtn.addEventListener("click", async () => {
       });
       if (giveUp) {
         if (curAbort) curAbort.abort();
+        loadingBox.hidden = true;
+        setResultVisible(hasResult);
         stopUi();
         showActionHint("已放弃等待。任务在后台继续运行，完成后会出现在生成历史里");
       }
