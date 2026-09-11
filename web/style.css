@@ -73,11 +73,10 @@ header {
 }
 /* 单行 header：波形弹性伸展吃掉中间空隙，避免大块空白堆在一处 */
 #waveHeader { height: 26px; flex: 1 1 120px; min-width: 40px; max-width: 480px; opacity: .9; align-self: center; }
-.brand small { display: none; } /* header 单行预算紧张，副标题移除，品牌保留 */
 .meters { row-gap: 4px; }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .02em; white-space: nowrap; }
 .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--primary); flex: none; }
-.brand small { color: var(--muted); font-weight: 500; }
+.brand small { display: none; color: var(--muted); font-weight: 500; } /* header 单行预算紧张，副标题隐藏，品牌保留 */
 .pill {
   display: inline-flex; align-items: center; gap: 7px;
   font-family: var(--mono); font-size: 12px; padding: 4px 11px;
@@ -528,7 +527,6 @@ main#pages { display: block; }
 .meter .bar { height: 4px; border-radius: 2px; background: var(--meter-track); overflow: hidden; }
 .meter .bar i { display: block; height: 100%; width: 0%; background: var(--accent); border-radius: 2px; transition: width .6s ease; }
 .meter.hot .bar i { background: var(--primary); }
-.meter b { color: var(--ink); font-weight: 600; white-space: nowrap; }
 
 /* ---------- manage pages shared ---------- */
 .mg-card { max-width: 1080px; margin: 0 auto; width: 100%; }

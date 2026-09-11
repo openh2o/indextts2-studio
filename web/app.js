@@ -358,8 +358,7 @@ $("text").addEventListener("input", () => {
   scheduleSegments();
 });
 
-// 文本框高度由 CSS 固定（#text 固定高 + 内部滚动），不再随内容自动撑高
-function autoGrow(el) { /* no-op: 保持固定高度布局 */ }
+// 文本框高度由 CSS 固定（#text 固定高 + 内部滚动），不随内容自动撑高
 
 /* gen summary line: emotion mode + preset name (visible param confirmation above CTA) */
 function updateGenSummary() {
@@ -918,7 +917,6 @@ function renderLib() {
           setSpkFile(file);
           $("text").value = ex.text || "";
           $("charCount").textContent = `${(ex.text || "").trim().length} 字`;
-          autoGrow($("text"));
           $("emoMode").value = String(ex.emo_mode ?? 0);
           if (ex.emo_weight != null) { $("emoWeight").value = ex.emo_weight; }
           $("emoText").value = ex.emo_text || "";
@@ -1408,7 +1406,6 @@ pollMetrics();
 bindSliders();
 emoVisible();
 updateSegments();
-autoGrow($("text"));
 updateGenSummary();
 switchLib("presets");
 (async () => {

@@ -5,11 +5,9 @@ the main TTS model is loaded lazily on first /tts request, so the server
 boots fast and idle VRAM stays at zero.
 """
 import argparse
-import hashlib
 import json
 import os
 import queue
-import re
 import sys
 import threading
 import time
@@ -45,11 +43,19 @@ from indextts.utils.presets import (
     save_preset,
     load_preset,
     delete_preset,
-    preset_exists,
     get_presets_dir,
     safe_preset_name,
 )
-
+# Pure helpers (mojibake repair / filename rules) live in their own module so
+# they can be unit-tested without importing the app or torch.
+from indextts.utils.server_helpers import (
+    fix_mojibake as _fix_mojibake,
+    safe_title as _safe_title,
+    unique_path as _unique_path,
+    output_name as _output_name,
+    prompt_file as _prompt_file_impl,
+    clean_legacy_prompts as _clean_legacy_prompts_impl,
+)
 parser = argparse.ArgumentParser(
     description="IndexTTS2 FastAPI server",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -231,116 +237,14 @@ os.makedirs("prompts", exist_ok=True)
 
 
 def _prompt_file(kind: str, data: bytes) -> str:
-    """Content-hash prompt filename: spk_<md5>.wav / emo_<md5>.wav.
-
-    Same audio content maps to the same path, so the reference-audio feature
-    cache in infer_v2 (keyed by path) hits across requests and the file is
-    overwritten in place instead of piling up per request.
-    """
-    return os.path.join("prompts", f"{kind}_{hashlib.md5(data).hexdigest()}.wav")
+    return _prompt_file_impl("prompts", kind, data)
 
 
 def _clean_legacy_prompts():
-    """Remove old random-uuid prompt files; keep content-hash files for reuse."""
-    for name in os.listdir("prompts"):
-        if not name.endswith(".wav"):
-            continue
-        path = os.path.join("prompts", name)
-        kind, _, rest = name.partition("_")
-        stem = rest[:-4] if rest.endswith(".wav") else rest
-        try:
-            with open(path, "rb") as f:
-                digest = hashlib.md5(f.read()).hexdigest()
-        except OSError:
-            continue
-        if kind in ("spk", "emo") and stem != digest:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+    _clean_legacy_prompts_impl("prompts")
 
 
 _clean_legacy_prompts()
-
-
-# Mojibake repair ------------------------------------------------------------
-# Some clients hand us text that was already mangled BEFORE it reached HTTP:
-# a console piping GBK bytes, a paste out of a GBK document, a tool that
-# re-encoded with the system ANSI codepage. Two shapes show up in outputs/:
-#   "楂樼鐨勯熸潗"        UTF-8 bytes read back as GBK
-#   "ä»Šå¤©å¤©æ°”"      UTF-8 bytes read back as cp1252
-# Both are reversible: re-encode with the suspect charset, decode as UTF-8.
-_MOJIBAKE_CHARSETS = ("cp1252", "gbk", "big5", "shift_jis", "latin-1")
-
-
-def _fix_mojibake(s: str) -> str:
-    """Recover text whose UTF-8 bytes were decoded with the wrong charset.
-
-    Only fires when the input carries an explicit decode-failure marker
-    (U+FFFD). An unconditional round-trip is NOT safe here: the GBK bytes of
-    ordinary Chinese can themselves form valid UTF-8. "为什么" encodes to GBK
-    as CE AA CA B2 C3 B4, which is a perfectly valid UTF-8 sequence decoding to
-    "Ϊʲô" -- so trying every charset on every input rewrites correct text into
-    junk. Checked against the 481 real filenames in outputs/ -- all clean, zero
-    false positives.
-
-    Mangling is usually lossy (whatever failed to decode became U+FFFD), so the
-    recovery is partial rather than exact.
-    """
-    if not s or "\ufffd" not in s:
-        return s
-    stripped = s.replace("\ufffd", "")
-    if not stripped:
-        return s
-    for enc in _MOJIBAKE_CHARSETS:
-        try:
-            raw = stripped.encode(enc)
-        except (UnicodeEncodeError, LookupError):
-            continue
-        for errors in ("strict", "replace"):
-            try:
-                cand = raw.decode("utf-8", errors=errors)
-            except UnicodeDecodeError:
-                continue
-            if cand and cand != s and cand.count("\ufffd") <= s.count("\ufffd"):
-                print(f">> Repaired mojibake text via {enc}: {s[:20]!r} -> {cand[:20]!r}", flush=True)
-                return cand
-    return s
-
-
-def _safe_title(text, maxlen=15):
-    t = _fix_mojibake(str(text or ""))
-    t = re.sub(r"[\r\n\t]+", " ", t)
-    t = re.sub(r'[\\/:*?"<>|]+', " ", t)
-    t = t.replace("\ufffd", "")                 # drop decode-failure markers
-    t = re.sub(r"[\x00-\x1f\x7f]+", "", t)      # drop control chars
-    t = re.sub(r"\s+", " ", t).strip()
-    t = t.strip(" .")
-    if not t:
-        return ""
-    return t[:maxlen]
-
-
-def _unique_path(path):
-    p = Path(path)
-    if not p.exists():
-        return str(p)
-    n = 2
-    while True:
-        cand = p.with_name(f"{p.stem}_{n}{p.suffix}")
-        if not cand.exists():
-            return str(cand)
-        n += 1
-
-
-def _output_name(text, naming):
-    title = _safe_title(text)
-    if naming == "title" and title:
-        return _unique_path(os.path.join("outputs", f"{title}.wav"))
-    if naming == "title_time" and title:
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        return _unique_path(os.path.join("outputs", f"{title}_{ts}.wav"))
-    return os.path.join("outputs", f"spk_{int(time.time())}_{uuid.uuid4().hex[:6]}.wav")
 
 
 @app.get("/health")
@@ -451,13 +355,22 @@ def model_state():
     return {"ok": True, **tts.state()}
 
 
+# Keys that POST /model/config accepts. `loaded` is state, not a setting;
+# unknown keys are typos and must 400 instead of being silently dropped.
+_MODEL_CONFIG_KEYS = frozenset({
+    "fp16", "s2mel_fp16", "w2v_fp16", "qwen_fp16", "cudnn_benchmark",
+    "diffusion_steps", "inference_cfg_rate",
+})
+
+
 @app.post("/model/config")
 def model_config(req: dict = Body(...)):
+    unknown = [k for k in req if k not in _MODEL_CONFIG_KEYS]
+    if unknown:
+        raise HTTPException(400, f"Unknown config keys: {', '.join(sorted(unknown))}")
     with _INFER_LOCK:
-        for key in req:
-            if key not in tts.state():
-                continue
-            tts.set_runtime(**{key: req[key]})
+        for key, val in req.items():
+            tts.set_runtime(**{key: val})
         cfg = tts.state()
         print(f">> Runtime config updated: steps={cfg['diffusion_steps']} cfg_rate={cfg['inference_cfg_rate']} "
               f"s2mel_fp16={cfg['s2mel_fp16']} fp16={cfg['fp16']}", flush=True)
@@ -541,6 +454,7 @@ def do_tts(
         file_naming = "title_time"
     # 文本可能在到达 HTTP 之前就已乱码（见 _fix_mojibake），先还原再用于合成与命名
     text = _fix_mojibake(text)
+    emo_text = _fix_mojibake(emo_text)
     try:
         spk_data = spk_audio.file.read()
     except Exception as e:
