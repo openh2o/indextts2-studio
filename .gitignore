@@ -38,6 +38,8 @@ desktop.ini
 # Local tool scratch
 .playwright-cli/
 .workbuddy/
+# GUI smoke-test evidence (kept locally, not part of the repo)
+/gui-test-screenshots/
 
 # Example audio files (downloaded on demand, not stored in git)
 /examples/*.wav
