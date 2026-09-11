@@ -219,7 +219,7 @@ uv run tools/gpu_check.py
 本仓库使用本地增强版 **FastAPI 前端（`server.py`，带实时进度 / 预设管理 / 模型配置）**，取代官方 gradio WebUI：
 
 ```bat
-start_server_bg.bat    :: 后台启动，自动打开 http://127.0.0.1:7860，日志写 logs\server_bg.log
+start_server.bat    :: 后台启动，自动打开 http://127.0.0.1:7860，日志写 logs\server_bg.log
 ```
 
 浏览器访问 `http://127.0.0.1:7860` 查看演示。

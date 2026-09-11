@@ -49,10 +49,11 @@
 
 ### 启动
 ```bat
-start_server_bg.bat     :: 后台启动（自动打开浏览器，日志写 logs\server_bg.log）
+start_server.bat     :: 后台启动（自动打开浏览器，日志写 logs\server_bg.log）
 ```
 - 服务地址：`http://127.0.0.1:7860`（`start_*.bat` 已内嵌 `HF_ENDPOINT=https://hf-mirror.com` 国内镜像）
-- 停止后台服务：
+- 服务默认只监听本机（127.0.0.1）；如需局域网访问，运行 `python server.py --host 0.0.0.0`，注意服务无鉴权，开放前自行评估风险
+- 停止后台服务：双击 `stop_server.bat`，或
   ```powershell
   powershell -Command "Get-NetTCPConnection -LocalPort 7860 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }"
   ```
@@ -77,7 +78,7 @@ start_server_bg.bat     :: 后台启动（自动打开浏览器，日志写 logs
 ## 四、绿色版打包（免安装分发）
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File build_portable.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/build_portable.ps1
 ```
 生成 `dist\IndexTTS2_portable\`（含便携 Python + 依赖 + 模型 + 启动脚本，约 16 GB），目标机解压后双击 `start_server_bg.bat` 即可运行，无需安装 Python / uv。压缩为 zip 发送可参考脚本生成的 `README.txt`。
 
@@ -345,7 +346,7 @@ uv run tools/gpu_check.py
 本仓库使用本地增强版 **FastAPI 前端（`server.py`，带实时进度 / 预设管理 / 模型配置）**，取代官方 gradio WebUI：
 
 ```bat
-start_server_bg.bat    :: 后台启动，自动打开 http://127.0.0.1:7860，日志写 logs\server_bg.log
+start_server.bat    :: 后台启动，自动打开 http://127.0.0.1:7860，日志写 logs\server_bg.log
 ```
 
 启动加速参数（FP16 / s2mel FP16 / cudnn_benchmark / diffusion_steps / cfg_rate）

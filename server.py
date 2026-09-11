@@ -56,7 +56,9 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("--verbose", action="store_true", default=False)
 parser.add_argument("--port", type=int, default=7860)
-parser.add_argument("--host", type=str, default="0.0.0.0")
+# Default to loopback: the server has no auth and can delete files/presets,
+# so it must not be reachable from the LAN unless the user opts in.
+parser.add_argument("--host", type=str, default="127.0.0.1")
 parser.add_argument("--model_dir", type=str, default="./checkpoints")
 parser.add_argument("--fp16", action="store_true", default=False)
 parser.add_argument("--s2mel_fp16", action="store_true", default=False)
