@@ -377,10 +377,12 @@ function updateGenSummary() {
 });
 
 /* ---------------- generation ---------------- */
-const genBtn = $("genBtn"), errBox = $("errBox");
+const genBtn = $("genBtn"), errBox = $("errBox"), cancelBtn = $("cancelBtn");
 const emptyHint = $("emptyHint"), loadingBox = $("loadingBox"), resultBody = $("resultBody");
 let elapsedTimer = null, genStart = 0;
 let hasResult = false;
+let curJobId = "";            // active inference job id (for cancel)
+let curAbort = null;          // AbortController for the SSE fetch
 function jobActive() { return genBtn.disabled; }
 
 function setResultVisible(visible) {
@@ -388,11 +390,12 @@ function setResultVisible(visible) {
   emptyHint.style.display = visible ? "none" : "";
 }
 
-function showLoading(stage) {
+function showLoading(stage, cancellable = true) {
   setResultVisible(false);
   loadingBox.hidden = false;
   $("pStage").textContent = stage;
   errBox.classList.remove("on");
+  cancelBtn.hidden = !cancellable;
 }
 
 const PROG_DESC = {
@@ -445,6 +448,9 @@ function stopUi() {
   cancelAnimationFrame(waveRAF);
   waveRAF = 0;
   genAnim.on = false;
+  cancelBtn.hidden = true;
+  curJobId = "";
+  curAbort = null;
   drawHeaderWave(0);
 }
 function showError(msg) {
@@ -473,6 +479,36 @@ function clearActionError() {
   hint.classList.remove("error");
 }
 
+/* 取消生成：排队中的任务直接取消（不浪费算力）；运行中的任务无法安全中断，
+   由用户确认后仅放弃等待，推理在后台继续跑完并计入历史。 */
+cancelBtn.addEventListener("click", async () => {
+  if (!curJobId) return;
+  const jobId = curJobId;
+  cancelBtn.disabled = true;
+  try {
+    const r = await fetch(`/tts/${jobId}/cancel`, { method: "POST" });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || "取消失败");
+    if (j.state === "queued") {
+      // 后端会把 error 事件推进 SSE 流，正常路径收尾
+      cancelBtn.textContent = "正在取消…";
+    } else {
+      // running：无法安全中断 GPU 推理。问用户要不要放弃等待（后台跑完入历史）
+      const giveUp = confirm("任务已在 GPU 上运行，无法安全中断。\n\n点「确定」放弃等待（推理将在后台继续完成，完成后可在生成历史中找回）；点「取消」继续等待。");
+      if (giveUp) {
+        if (curAbort) curAbort.abort();
+        stopUi();
+        showActionHint("已放弃等待。任务在后台继续运行，完成后会出现在生成历史里");
+      }
+    }
+  } catch (e) {
+    showActionError("取消失败: " + e.message);
+  } finally {
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = "取消生成";
+  }
+});
+
 genBtn.addEventListener("click", async () => {
   const text = $("text").value.trim();
   if (!text) { showError("请先输入要合成的文本"); return; }
@@ -484,6 +520,8 @@ genBtn.addEventListener("click", async () => {
 
   genBtn.disabled = true;
   genStart = performance.now();
+  curJobId = "";
+  curAbort = new AbortController();
   player.pause();
   bigPlayIcon.innerHTML = PLAY2;
   clearActionError();
@@ -517,7 +555,7 @@ genBtn.addEventListener("click", async () => {
   fd.append("file_naming", "title_time");
 
   try {
-    const r = await fetch("/tts", { method: "POST", body: fd });
+    const r = await fetch("/tts", { method: "POST", body: fd, signal: curAbort.signal });
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
       throw new Error(j.detail || `请求失败（${r.status}）`);
@@ -538,7 +576,12 @@ genBtn.addEventListener("click", async () => {
         if (!dl) continue;
         let ev;
         try { ev = JSON.parse(dl.slice(5).trim()); } catch (e) { continue; }
-        if (ev.type === "load") {
+        if (ev.type === "started") {
+          curJobId = ev.job_id || "";
+        } else if (ev.type === "queue") {
+          showLoading(`排队中… 前面还有 ${ev.ahead} 个任务`);
+          $("pStageMeta").textContent = `排队 #${ev.ahead + 1}`;
+        } else if (ev.type === "load") {
           loadingModel = true;
           markStep(0, "running");
           showLoading("正在加载模型…首次调用需 30~60 秒");
@@ -567,7 +610,7 @@ genBtn.addEventListener("click", async () => {
           loadingBox.hidden = true;
           stopUi();
           histCurId = ev.history_id || "";
-          await loadResult(ev.wav, ev.elapsed);
+          await loadResult(ev.wav, ev.elapsed, ev.file);
           await refreshHistory();
           pollStatus();
         } else if (ev.type === "error") {
@@ -577,6 +620,7 @@ genBtn.addEventListener("click", async () => {
     }
     if (genBtn.disabled) showError("生成连接中断，请重试");
   } catch (e) {
+    if (e.name === "AbortError") return; // 用户主动放弃等待，提示已在 cancel 里给过
     showError(e.message);
     pollStatus();
   }
@@ -590,9 +634,12 @@ const bigPlay = $("bigPlay"), bigPlayIcon = $("bigPlayIcon");
 const PLAY2 = '<path d="M8 5v14l11-7z"/>';
 const PAUSE2 = '<path d="M6 5h4v14H6zM14 5h4v14h-4z"/>';
 let curUrl = null;
+let curServerFile = "";       // 服务端实际保存的文件名（下载时与它保持一致）
 
-async function loadResult(url, elapsed) {
+async function loadResult(url, elapsed, serverFile) {
   curUrl = url;
+  // 下载名与服务端 outputs/ 里的实际文件一致；文本改动不再影响已生成的结果名
+  curServerFile = serverFile || (url || "").split("/").pop() || "";
   loadingBox.hidden = true;
   setResultVisible(true);
   clearActionError();
@@ -674,7 +721,9 @@ tWave.addEventListener("pointermove", (e) => {
   const d = trim.buffer.duration;
   $("trimRange").textContent = `选中 ${(trim.sel[0] * d).toFixed(2)}s – ${(trim.sel[1] * d).toFixed(2)}s`;
 });
-tWave.addEventListener("pointerup", () => { trim.drag = null; });
+tWave.addEventListener("pointerup", () => {
+  if (trim.drag) { trim.drag = null; updateDlName(); } // 选区定稿后再刷新下载名（带 _trim 后缀）
+});
 
 let selStopTick = null;
 $("playSel").addEventListener("click", () => {
@@ -694,13 +743,14 @@ $("playSel").addEventListener("click", () => {
 $("resetSel").addEventListener("click", () => {
   trim.sel = null;
   $("trimRange").textContent = `全长 ${trim.buffer ? trim.buffer.duration.toFixed(2) : "—"}s`;
+  updateDlName();
   drawTrimWave();
 });
 
 player.addEventListener("play", () => { bigPlayIcon.innerHTML = PAUSE2; });
 player.addEventListener("pause", () => { bigPlayIcon.innerHTML = PLAY2; });
 
-/* ---- WAV export & download: mirrors the server-side naming rules ---- */
+/* ---- WAV export & download ---- */
 function encodeWav(buffer, s0, s1) {
   const sr = buffer.sampleRate;
   const from = Math.floor((s0 || 0) * buffer.length);
@@ -724,19 +774,18 @@ function encodeWav(buffer, s0, s1) {
   return new Blob([out], { type: "audio/wav" });
 }
 
-function safeTitle(text, maxlen = 15) {
-  let t = String(text || "").replace(/[\r\n\t]+/g, " ").trim();
-  t = t.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim().replace(/^[\s.]+|[\s.]+$/g, "");
-  return t ? t.slice(0, maxlen) : "";
-}
 function updateDlName() {
-  const title = safeTitle($("text").value);
-  const t = new Date();
-  const pad = (x) => String(x).padStart(2, "0");
-  const stamp = `${t.getFullYear()}${pad(t.getMonth() + 1)}${pad(t.getDate())}_${pad(t.getHours())}${pad(t.getMinutes())}${pad(t.getSeconds())}`;
-  $("dlName").textContent = title ? `${title}_${stamp}.wav` : `spk_${Math.floor(t.getTime() / 1000)}.wav`;
+  // 与服务端 outputs/ 的实际文件名保持一致；仅剪辑下载时加 _trim 后缀
+  if (curServerFile) {
+    const base = curServerFile.replace(/\.wav$/i, "");
+    $("dlName").textContent = trim.sel ? `${base}_trim.wav` : curServerFile;
+    return;
+  }
+  // 回退：从结果 URL 推导（历史回放等场景）
+  const fromUrl = (curUrl || "").split("/").pop();
+  if (fromUrl && fromUrl !== "audio") { $("dlName").textContent = fromUrl; return; }
+  $("dlName").textContent = `spk_${Math.floor(Date.now() / 1000)}.wav`;
 }
-$("text").addEventListener("input", () => { if (trim.buffer) updateDlName(); });
 
 $("dlBtn").addEventListener("click", () => {
   if (!trim.buffer) return;
@@ -1027,7 +1076,7 @@ function renderHistory() {
       if (e.target.closest(".pm-del")) return;
       histCurId = it.id;
       renderHistory();
-      await loadResult(it.url, it.elapsed);
+      await loadResult(it.url, it.elapsed, it.file);
     });
     del.addEventListener("click", async (e) => {
       e.stopPropagation();

@@ -354,6 +354,9 @@ textarea:focus, select:focus, input:focus {
 .pmeta { display: flex; justify-content: space-between; gap: 12px; margin-top: 7px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
 .pmeta b { color: var(--ink); font-weight: 600; }
 .psteps { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+/* 排队/生成中的取消按钮：弱化样式，不与进度信息抢焦点 */
+.cancelbtn { margin-top: 12px; align-self: flex-start; }
+.cancelbtn:disabled { opacity: .5; cursor: wait; }
 .pstep {
   font-family: var(--mono); font-size: 11px; color: var(--faint);
   padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2);

@@ -422,6 +422,40 @@ def model_restart():
 _INFER_LOCK = threading.Lock()
 
 
+# 推理任务注册表:让"排队中的任务"可被取消。已在 GPU 上运行的任务不强行中断
+# —— 跨线程打断 forward 会破坏共享模型状态;运行中取消只是客户端放弃等待,
+# 推理在后台继续跑完并计入历史,用户可回头找回结果。
+_JOBS_LOCK = threading.Lock()
+_JOBS = {}  # job_id -> {"state": "queued" | "running" | "cancelled"}
+
+
+def _register_job():
+    """Register a queued inference job; returns (job_id, jobs_ahead)."""
+    job_id = uuid.uuid4().hex[:12]
+    with _JOBS_LOCK:
+        ahead = sum(1 for j in _JOBS.values() if j["state"] == "queued")
+        _JOBS[job_id] = {"state": "queued"}
+    return job_id, ahead
+
+
+@app.post("/tts/{job_id}/cancel")
+def tts_cancel(job_id: str):
+    """Cancel an inference job.
+
+    queued  -> skipped before it ever touches the GPU (no wasted compute);
+    running -> cannot be safely interrupted; the response says so and the
+               client decides whether to keep waiting.
+    """
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(404, "Job not found or already finished")
+        state = job["state"]
+        if state == "queued":
+            job["state"] = "cancelled"
+    return {"ok": True, "state": state}
+
+
 @app.post("/tts")
 def do_tts(
     text: str = Form(...),
@@ -500,11 +534,23 @@ def do_tts(
     out_path = _output_name(text, file_naming)
     t0 = time.time()
     progress_q = queue.Queue()
+    job_id, jobs_ahead = _register_job()
 
     def run_infer():
+        progress_q.put({"type": "started", "job_id": job_id})
         if not tts.loaded:
             progress_q.put({"type": "load", "value": 0.0, "desc": "model loading..."})
+        if jobs_ahead > 0:
+            progress_q.put({"type": "queue", "ahead": jobs_ahead})
         with _INFER_LOCK:
+            # queued 阶段被取消:任务从没碰过 GPU,直接短路,不浪费算力
+            with _JOBS_LOCK:
+                job = _JOBS.get(job_id)
+                if job is not None and job["state"] == "cancelled":
+                    progress_q.put({"type": "error", "detail": "已取消（排队中的任务未开始生成）"})
+                    return
+                if job is not None:
+                    job["state"] = "running"
             _run_infer_locked()
 
     def _run_infer_locked():
@@ -544,6 +590,7 @@ def do_tts(
                 progress_q.put({
                     "type": "done",
                     "wav": f"/audio/{wav_name}",
+                    "file": wav_name,
                     "elapsed": elapsed,
                     "history_id": entry["id"],
                 })
@@ -552,6 +599,8 @@ def do_tts(
             progress_q.put({"type": "error", "detail": f"Inference failed: {e}"})
         finally:
             model.gr_progress = prev_progress
+            with _JOBS_LOCK:
+                _JOBS.pop(job_id, None)
 
     threading.Thread(target=run_infer, daemon=True).start()
 
