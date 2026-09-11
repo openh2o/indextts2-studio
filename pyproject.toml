@@ -64,9 +64,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# To install the WebUI support, use `uv sync --extra webui` (or `--all-extras`).
+# Use "wetext" on Windows/Mac, otherwise "WeTextProcessing" on Linux.
 webui = [
   "gradio==5.45.0",
+]
+# Lightweight FastAPI server (server.py) + web UI (web/).
+# uv sync --extra server
+server = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "psutil>=5.9",
+  "python-multipart>=0.0.9",
 ]
 test = [
   "pytest>=7.0",

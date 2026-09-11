@@ -12,7 +12,9 @@ permissions:
 jobs:
   lightweight-checks:
     name: Lightweight Python checks
-    runs-on: ubuntu-latest
+    # uv.lock only resolves for win32 (tool.uv.environments in pyproject.toml),
+    # so the test job must run on Windows.
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -21,10 +23,10 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral/setup-uv@v5
 
       - name: Run tests (no GPU)
         run: uv run --extra test pytest -m "not gpu" -v
