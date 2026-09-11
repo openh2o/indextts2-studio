@@ -3,6 +3,72 @@
 
 const $ = (id) => document.getElementById(id);
 
+/* ---------------- themed modal (replaces native confirm/prompt) ----------------
+   uiConfirm({title, body, okText, danger}) -> Promise<boolean>
+   uiPrompt ({title, body, placeholder, value})  -> Promise<string|null>
+   阻塞语义与原生一致：点遮罩/取消都算否定，Esc 等同取消。 */
+const _modal = {
+  mask: null, okBtn: null, input: null, resolve: null, prevFocus: null,
+};
+function _modalSetup() {
+  if (_modal.mask) return;
+  _modal.mask = $("modalMask");
+  _modal.okBtn = $("modalOk");
+  _modal.input = $("modalInput");
+  $("modalCancel").addEventListener("click", () => _modalClose(false));
+  _modal.okBtn.addEventListener("click", () => {
+    if (!_modal.input.hidden && !_modal.input.value.trim()) {
+      const err = $("modalError");
+      err.textContent = "请输入内容"; err.hidden = false;
+      _modal.input.focus();
+      return;
+    }
+    _modalClose(true);
+  });
+  _modal.mask.addEventListener("click", (e) => { if (e.target === _modal.mask) _modalClose(false); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !_modal.mask.hidden) _modalClose(false);
+  });
+}
+function _modalOpen(opts) {
+  _modalSetup();
+  $("modalTitle").textContent = opts.title || "";
+  $("modalBody").textContent = opts.body || "";
+  $("modalBody").hidden = !opts.body;
+  $("modalError").hidden = true;
+  _modal.input.hidden = !opts.prompt;
+  _modal.input.value = opts.value || "";
+  _modal.input.placeholder = opts.placeholder || "";
+  _modal.okBtn.textContent = opts.okText || "确定";
+  _modal.okBtn.classList.toggle("primary", !opts.danger);
+  _modal.prevFocus = document.activeElement;
+  _modal.mask.hidden = false;
+  (_modal.input.hidden ? _modal.okBtn : _modal.input).focus();
+}
+function _modalClose(ok) {
+  if (_modal.mask.hidden) return;
+  _modal.mask.hidden = true;
+  const res = _modal.resolve;
+  _modal.resolve = null;
+  if (_modal.prevFocus && _modal.prevFocus.focus) _modal.prevFocus.focus();
+  if (res) res(ok && !_modal.input.hidden ? _modal.input.value : ok);
+}
+function uiConfirm(opts) {
+  return new Promise((resolve) => {
+    if (_modal.resolve) _modal.resolve(false); // 顶掉上一个未决弹窗
+    _modalOpen({ ...opts, prompt: false });
+    _modal.resolve = resolve;
+  });
+}
+function uiPrompt(opts) {
+  return new Promise((resolve) => {
+    if (_modal.resolve) _modal.resolve(false);
+    _modalOpen({ ...opts, prompt: true });
+    _modal.resolve = resolve;
+  });
+}
+_modal.input = null; // init lazily in _modalSetup
+
 /* ---------------- theme ---------------- */
 const themeBtn = $("themeBtn"), themeIcon = $("themeIcon");
 const SUN = '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4m11.4-11.4 1.4-1.4"/>';
@@ -61,13 +127,28 @@ function drawHeaderWave(t) {
   }
   hCtx.globalAlpha = 1;
 }
-setInterval(() => drawHeaderWave(waveT + 16), 250); // gentle idle refresh
+setInterval(() => { if (!document.hidden) drawHeaderWave(waveT + 16); }, 250); // gentle idle refresh
 let waveRAF = 0;
 function waveLoop(t) {
   waveT = t;
-  if (genAnim.on) { drawHeaderWave(t); waveRAF = requestAnimationFrame(waveLoop); }
-  else { waveRAF = 0; drawHeaderWave(0); }
+  if (genAnim.on && !document.hidden) { drawHeaderWave(t); waveRAF = requestAnimationFrame(waveLoop); }
+  else { waveRAF = 0; if (!document.hidden) drawHeaderWave(0); }
 }
+/* 后台标签页暂停：metrics 轮询会触发 nvidia-smi 子进程，闲置时不空转。
+   生成进行中则不停 —— SSE 是推送流不受影响，但回前台要立即刷新一次。 */
+let metricsTimer = null;
+function setMetricsPolling(on) {
+  if (on && metricsTimer == null) {
+    metricsTimer = setInterval(pollMetrics, 2000);
+    pollMetrics();
+  } else if (!on && metricsTimer != null) {
+    clearInterval(metricsTimer);
+    metricsTimer = null;
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  setMetricsPolling(!document.hidden);
+});
 
 /* ---------------- system gauges (device / cpu / mem / gpu / vram) ---------------- */
 function setMeter(id, pct, label) {
@@ -113,7 +194,7 @@ async function pollStatus() {
   }
 }
 setInterval(pollStatus, 2000);
-setInterval(pollMetrics, 2000);
+setMetricsPolling(true);
 
 /* ---------------- speaker reference audio ---------------- */
 const spkDrop = $("spkDrop"), spkFile = $("spkFile");
@@ -263,6 +344,12 @@ function setVecInputs(arr) {
     if (val) val.textContent = Number(v).toFixed(2);
   });
 }
+/* 快捷情感：一键填一组典型向量（单轴饱和值，与示例库 voice_09 的用法一致） */
+$("vecChips").addEventListener("click", (e) => {
+  const chip = e.target.closest(".chip");
+  if (!chip) return;
+  setVecInputs(chip.dataset.v.split(",").map(Number));
+});
 function emoVisible() {
   const m = $("emoMode").value;
   $("emoAudioBox").hidden = m != "1";
@@ -346,7 +433,14 @@ async function updateSegments() {
     segList.replaceChildren(...rows);
     const totalTok = segs.reduce((a, s) => a + s.tokens, 0);
     $("segInfo").textContent = `分句 ${segs.length} 段 · ${totalTok} tok`;
-    $("estDurEcho").textContent = `共 ${segs.length} 段 · ${$("text").value.trim().length} 字`;
+    // 耗时预估：每段固定开销 + 每 token 线性项（按本机 RTX 3060 Ti 默认配置标定，
+    // 粗略值只为给长文本用户一个心理预期，不是精确基准）
+    const estSec = Math.round(segs.length * 4 + totalTok * 0.06);
+    const est = estSec >= 60 ? `约 ${Math.round(estSec / 60)} 分钟` : `约 ${estSec} 秒`;
+    $("estDurEcho").textContent = `共 ${segs.length} 段 · ${$("text").value.trim().length} 字 · 预估 ${est}`;
+    if (segs.length > 10) {
+      $("estDurEcho").textContent += "（长文本，建议分段生成）";
+    }
   } catch (err) { /* keep the last good preview */ }
 }
 function scheduleSegments() {
@@ -494,7 +588,11 @@ cancelBtn.addEventListener("click", async () => {
       cancelBtn.textContent = "正在取消…";
     } else {
       // running：无法安全中断 GPU 推理。问用户要不要放弃等待（后台跑完入历史）
-      const giveUp = confirm("任务已在 GPU 上运行，无法安全中断。\n\n点「确定」放弃等待（推理将在后台继续完成，完成后可在生成历史中找回）；点「取消」继续等待。");
+      const giveUp = await uiConfirm({
+        title: "任务运行中",
+        body: "任务已在 GPU 上运行，无法安全中断。放弃等待后，推理将在后台继续完成，完成后可在生成历史中找回。",
+        okText: "放弃等待",
+      });
       if (giveUp) {
         if (curAbort) curAbort.abort();
         stopUi();
@@ -860,9 +958,8 @@ let curLib = "presets";
 /* shared: apply a preset by name; returns success */
 async function applyPresetByName(name) {
   try {
-    const r = await fetch("/presets/" + encodeURIComponent(name));
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.detail || "加载失败");
+    const j = await presetDetail(name, true); // 应用时强制拉最新
+    if (!j) throw new Error("加载失败");
     curPresetName = name;
     applyPresetToForm(j);
     showActionHint("已加载预设: " + name);
@@ -885,6 +982,18 @@ async function refreshPresets() {
     const r = await (await fetch("/presets")).json();
     presetNamesCache = r.presets || [];
   } catch (err) { /* keep old list */ }
+}
+
+/* 预设详情统一缓存（跨 libList / preset 管理页复用，避免 N+1 重复请求） */
+const presetDetailCache = new Map();
+function presetDetail(name, force = false) {
+  if (!force && presetDetailCache.has(name)) return presetDetailCache.get(name);
+  const p = fetch("/presets/" + encodeURIComponent(name))
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => { presetDetailCache.set(name, d); return d; })
+    .catch(() => null);
+  presetDetailCache.set(name, p);
+  return p;
 }
 
 function renderLib() {
@@ -910,7 +1019,7 @@ function renderLib() {
       row.title = "点击应用此预设";
       row.querySelector(".pm-del").setAttribute("aria-label", "删除预设 " + name);
       const meta = row.querySelector(".hmeta");
-      fetch("/presets/" + encodeURIComponent(name)).then((r) => r.ok ? r.json() : null).then((d) => {
+      presetDetail(name).then((d) => {
         if (!d) { meta.textContent = "-"; return; }
         const adv = d.advanced_params || {};
         meta.textContent = `${["同参考", "情感音频", "向量", "文本"][d.emo_control_method] ?? "-"} · ${d.prompt_audio ? "含音频" : "无音频"} · temp ${adv.temperature ?? "-"}`;
@@ -921,7 +1030,7 @@ function renderLib() {
       });
       row.querySelector(".pm-del").addEventListener("click", async (e) => {
         e.stopPropagation();
-        if (!confirm("确定删除预设 " + name + " ？此操作不可恢复")) return;
+        if (!await uiConfirm({ title: "删除预设", body: `确定删除预设「${name}」？此操作不可恢复。`, okText: "删除", danger: true })) return;
         try {
           const r = await fetch("/presets/" + encodeURIComponent(name), { method: "DELETE" });
           if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "删除失败");
@@ -992,8 +1101,8 @@ $("btnLibRefresh").addEventListener("click", async () => {
   if (!presetNamesCache.length) showActionHint("暂无预设");
 });
 $("btnLibSave").addEventListener("click", async () => {
-  const name = prompt("请输入预设名称：");
-  if (name === null) return;
+  const name = await uiPrompt({ title: "保存当前为预设", placeholder: "请输入预设名称", value: curPresetName || "" });
+  if (name === null || name === false) return;
   const trimmed = name.trim();
   if (!trimmed) { showActionError("请输入预设名称"); return; }
   const fd = new FormData();
@@ -1119,7 +1228,12 @@ $("histAuto").addEventListener("change", async (e) => {
 
 $("histClear").addEventListener("click", async () => {
   if (!histItems.length) return;
-  if (!confirm("清空生成历史？自动清理开启时，对应的音频文件会一并删除，此操作不可恢复。")) return;
+  if (!await uiConfirm({
+    title: "清空生成历史",
+    body: `自动清理开启时，对应的 ${histItems.length} 个音频文件会一并删除，此操作不可恢复。`,
+    okText: "清空",
+    danger: true,
+  })) return;
   try {
     await fetch("/history", { method: "DELETE" });
     histCurId = "";
@@ -1191,7 +1305,7 @@ $("btnAddTerm").addEventListener("click", async () => {
 
 /* ---------------- page tabs (gen / presets / model) ---------------- */
 const tabBtns = document.querySelectorAll("#tabs .tab");
-function switchPage(name) {
+function switchPage(name, updateHash = true) {
   tabBtns.forEach((b) => b.classList.toggle("cur", b.dataset.page === name));
   document.querySelectorAll(".page").forEach((p) => {
     const on = p.dataset.page === name;
@@ -1200,13 +1314,20 @@ function switchPage(name) {
   });
   if (name === "model") refreshModelPage();
   if (name === "presets") refreshPmList();
+  // hash 路由：刷新/分享链接时停留在当前页签
+  if (updateHash && location.hash.slice(1) !== name) {
+    history.replaceState(null, "", "#" + name);
+  }
 }
 tabBtns.forEach((b) => b.addEventListener("click", () => switchPage(b.dataset.page)));
+window.addEventListener("hashchange", () => {
+  const target = location.hash.slice(1);
+  if (["gen", "presets", "model"].includes(target)) switchPage(target, false);
+});
 
 /* ---------------- preset manage page (card flow + search) ---------------- */
 const pmCards = $("pmCards"), pmHint = $("pmHint"), pmSearch = $("pmSearch");
 let pmListCache = [];       // all preset names
-let pmDetailCache = {};     // name -> detail object (lazy)
 let pmCurName = "";
 function pmFlash(msg, isErr) {
   pmHint.textContent = msg;
@@ -1225,14 +1346,7 @@ async function refreshPmList() {
 }
 
 async function pmLoadDetail(name) {
-  if (pmDetailCache[name]) return pmDetailCache[name];
-  try {
-    const r = await fetch("/presets/" + encodeURIComponent(name));
-    if (!r.ok) return null;
-    const d = await r.json();
-    pmDetailCache[name] = d;
-    return d;
-  } catch (e) { return null; }
+  return presetDetail(name);
 }
 
 async function renderPmCards() {
@@ -1271,11 +1385,11 @@ async function renderPmCards() {
     // click ✕ → delete with confirm
     card.querySelector(".pm-del").addEventListener("click", async (e) => {
       e.stopPropagation();
-      if (!confirm("确定删除预设 " + name + " ？此操作不可恢复")) return;
+      if (!await uiConfirm({ title: "删除预设", body: `确定删除预设「${name}」？此操作不可恢复。`, okText: "删除", danger: true })) return;
       try {
         const r = await fetch("/presets/" + encodeURIComponent(name), { method: "DELETE" });
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "删除失败");
-        delete pmDetailCache[name];
+        presetDetailCache.delete(name);
         if (pmCurName === name) pmCurName = "";
         pmFlash("已删除预设: " + name);
         await refreshPmList();
@@ -1286,7 +1400,7 @@ async function renderPmCards() {
   }
 }
 pmSearch.addEventListener("input", renderPmCards);
-$("btnPmRefresh").addEventListener("click", () => { pmDetailCache = {}; refreshPmList(); pmFlash("已刷新"); });
+$("btnPmRefresh").addEventListener("click", () => { presetDetailCache.clear(); refreshPmList(); pmFlash("已刷新"); });
 $("btnPmCreate").addEventListener("click", async () => {
   const name = $("pmName").value.trim();
   if (!name) { pmFlash("请输入预设名称", true); return; }
@@ -1305,8 +1419,7 @@ $("btnPmCreate").addEventListener("click", async () => {
     pmFlash("预设已创建: " + name);
     await refreshPmList();
     await refreshPresets();
-    pmDetailCache[name] = undefined; // force reload of its detail
-    delete pmDetailCache[name];
+    presetDetailCache.delete(name); // 创建即覆盖旧值，强制下次拉最新
   } catch (e) { pmFlash("创建失败: " + e.message, true); }
 });
 
@@ -1379,7 +1492,7 @@ $("btnModelLoad").addEventListener("click", async () => {
   await refreshModelPage();               // 无论成败都刷新状态位，清掉计时文案
 });
 $("btnModelUnload").addEventListener("click", async () => {
-  if (!confirm("确定卸载模型？卸载后首次生成需重新加载（约 30~60 秒）")) return;
+  if (!await uiConfirm({ title: "卸载模型", body: "卸载后首次生成需重新加载（约 30~60 秒）。", okText: "卸载" })) return;
   try {
     const r = await (await fetch("/model/unload", { method: "POST" })).json();
     if (!r.ok) throw new Error(r.error || "卸载失败");
@@ -1388,7 +1501,7 @@ $("btnModelUnload").addEventListener("click", async () => {
   } catch (e) { mmFlashErr(e.message); }
 });
 $("btnModelRestart").addEventListener("click", async () => {
-  if (!confirm("确定重启模型？将应用当前页面上的加速配置，期间无法生成")) return;
+  if (!await uiConfirm({ title: "重启模型", body: "将应用当前页面上的加速配置，期间无法生成。", okText: "重启" })) return;
   const btn = $("btnModelRestart");
   btn.disabled = true;
   const old = btn.textContent;
@@ -1459,11 +1572,11 @@ updateGenSummary();
 switchLib("presets");
 (async () => {
   await Promise.all([refreshPresets(), loadExamples()]);
-  renderLib();
-})();
+  renderLib();})();
 refreshPmList();
 renderGlossary();
-switchPage("gen");
+/* 起始页签跟 URL hash（#gen/#presets/#model），刷新后不丢当前页 */
+switchPage(["gen", "presets", "model"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "gen", false);
 
 const _ro = new ResizeObserver(() => {
   drawHeaderWave();

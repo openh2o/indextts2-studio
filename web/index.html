@@ -86,6 +86,18 @@
       </div>
 
       <div id="emoVecBox" class="emo-box" hidden>
+        <div class="vec-chips" id="vecChips">
+          <span class="vec-chips-label">快捷填充：</span>
+          <button class="chip" data-v="0.85,0,0,0,0,0,0,0" type="button">喜悦</button>
+          <button class="chip" data-v="0,0.85,0,0,0,0,0,0" type="button">愤怒</button>
+          <button class="chip" data-v="0,0,0.85,0,0,0,0,0" type="button">悲伤</button>
+          <button class="chip" data-v="0,0,0,0.85,0,0,0,0" type="button">恐惧</button>
+          <button class="chip" data-v="0,0,0,0,0.85,0,0,0" type="button">厌恶</button>
+          <button class="chip" data-v="0,0,0,0,0,0.85,0,0" type="button">低落</button>
+          <button class="chip" data-v="0,0,0,0,0,0,0.85,0" type="button">惊喜</button>
+          <button class="chip" data-v="0,0,0,0,0,0,0,0.85" type="button">平静</button>
+          <button class="chip ghost" data-v="0,0,0,0,0,0,0,0" type="button">清零</button>
+        </div>
         <div class="vec-grid" id="vecs"></div>
       </div>
 
@@ -338,6 +350,20 @@
 </main>
 
 <footer>模型懒加载：页面秒开，首次生成约需 30~60 秒加载模型 · 深浅色主题跟随系统偏好，可点右上角切换</footer>
+
+<!-- 轻量模态弹窗：替代原生 alert/confirm/prompt，与主题一致 -->
+<div class="modal-mask" id="modalMask" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-title" id="modalTitle"></div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-error" id="modalError" hidden></div>
+    <div class="modal-foot">
+      <input type="text" id="modalInput" hidden>
+      <button class="btn ghost" id="modalCancel" type="button">取消</button>
+      <button class="btn primary" id="modalOk" type="button">确定</button>
+    </div>
+  </div>
+</div>
 
 <script src="/assets/app.js?v=202609092"></script>
 </body>

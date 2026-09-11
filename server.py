@@ -247,6 +247,36 @@ def _clean_legacy_prompts():
 _clean_legacy_prompts()
 
 
+# outputs/ 保留策略：历史自动清理只覆盖"本次运行"生成过的文件，服务器重启后
+# 旧文件全成孤儿，目录会无限膨胀（实测曾积到 489 个 / 207MB）。启动时按
+# mtime 清掉超过保留天数的孤儿 wav；预设目录(outputs/presets)一并保护。
+OUTPUTS_RETENTION_DAYS = 14
+OUTPUTS_DIR = "outputs"
+
+
+def _clean_stale_outputs(retention_days: int = OUTPUTS_RETENTION_DAYS) -> int:
+    """Delete orphan wavs older than retention_days; returns removed count."""
+    if retention_days <= 0:
+        return 0
+    cutoff = time.time() - retention_days * 86400
+    removed = 0
+    try:
+        names = os.listdir(OUTPUTS_DIR)
+    except OSError:
+        return 0
+    for name in names:
+        path = os.path.join(OUTPUTS_DIR, name)
+        if not name.endswith(".wav") or not os.path.isfile(path):
+            continue
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "model_loaded": tts.loaded}
@@ -934,5 +964,8 @@ def glossary_clear():
 
 if __name__ == "__main__":
     import uvicorn
+    removed = _clean_stale_outputs()
+    if removed:
+        print(f">> Cleaned {removed} output file(s) older than {OUTPUTS_RETENTION_DAYS} days.", flush=True)
     print(f"IndexTTS2 server starting... port {cmd_args.port}", flush=True)
     uvicorn.run(app, host=cmd_args.host, port=cmd_args.port, log_level="warning")
