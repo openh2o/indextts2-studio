@@ -17,8 +17,9 @@
   --radius: 14px;
   --pad: 20px;
   --gap: 16px;
-  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
-  --sans: "Sora", "Inter", system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+  /* 系统字体栈：无外链依赖（Google Fonts 在离线/国内环境不可达），零阻塞 */
+  --mono: "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+  --sans: "Segoe UI", system-ui, -apple-system, "Microsoft YaHei", "PingFang SC", sans-serif;
 }
 html[data-theme="dark"] {
   --bg: #131211;
