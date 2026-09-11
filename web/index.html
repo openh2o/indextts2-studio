@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IndexTTS2 Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/style.css?v=20260909">
+</head>
+<body>
+
+<header>
+  <div class="hdr-row">
+    <div class="brand"><span class="dot"></span>IndexTTS2 <small>语音克隆 · 情感控制</small></div>
+    <canvas id="waveHeader" aria-hidden="true"></canvas>
+    <span class="pill" id="modelPill" data-s="unloaded"><span class="led"></span><span id="modelPillText">模型未加载</span></span>
+    <span class="pill dev" id="devPill" title="运行设备"><span class="led" style="background:var(--accent)"></span><span id="devText">检测中…</span></span>
+    <div class="meters" id="meters">
+      <div class="meter" id="mCpu"><span>CPU <b>--</b></span><div class="bar"><i></i></div></div>
+      <div class="meter" id="mMem"><span>内存 <b>--</b></span><div class="bar"><i></i></div></div>
+      <div class="meter" id="mGpu"><span>GPU <b>--</b></span><div class="bar"><i></i></div></div>
+      <div class="meter" id="mVram"><span>显存 <b>--</b></span><div class="bar"><i></i></div></div>
+    </div>
+    <div class="spacer"></div>
+    <nav class="tabs" id="tabs" aria-label="页面切换">
+      <button class="tab cur" data-page="gen" type="button">语音合成</button>
+      <button class="tab" data-page="presets" type="button">预设管理</button>
+      <button class="tab" data-page="model" type="button">模型管理</button>
+    </nav>
+    <button class="iconbtn" id="themeBtn" aria-label="切换深浅色主题" title="切换主题">
+      <svg id="themeIcon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></svg>
+    </button>
+  </div>
+</header>
+
+<main id="pages">
+
+  <!-- ============ 页面 1：语音合成 ============ -->
+  <div class="page cur" data-page="gen">
+  <!-- ===== left: operation panel with step flow ===== -->
+  <section class="card ops">
+    <div class="opstep" data-step="1">
+      <label class="oplabel" for="text">合成文本</label>
+      <div class="grow"><textarea id="text" rows="4" placeholder="输入要合成的文本…">欢迎使用 IndexTTS2 语音合成工作台！上传参考音频，即刻克隆你想要的声音</textarea></div>
+      <div class="opfoot mono"><span id="charCount">0 字</span><span id="segInfo">分句预览待输入</span></div>
+      <details class="fold seg-fold" id="segFold" open>
+        <summary>分句预览 <span class="q" title="输入文本后实时更新；按分句最大 Token 数自动切分">?</span></summary>
+        <div class="seg-scroll"><div class="seg-list" id="segList"></div></div>
+      </details>
+    </div>
+
+    <div class="opstep" data-step="2">
+      <label class="oplabel" for="spkFile">音色参考音频</label>
+      <label class="drop" id="spkDrop">
+        <input type="file" id="spkFile" accept="audio/*,.wav,.mp3,.flac,.ogg">
+        <svg class="drop-ic" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="m7 8 5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+        <span class="drop-main" id="spkName">点击选择或拖入音频文件</span>
+        <span class="drop-sub" id="spkSub">约 3~10 秒参考音频效果最佳</span>
+      </label>
+      <div id="spkPlayerBox" hidden>
+        <canvas id="spkWave" aria-label="参考音频声纹，拖动定位播放位置"></canvas>
+        <div class="refrow">
+          <button class="iconbtn" id="spkPlay" aria-label="播放或暂停参考音频" title="播放/暂停">
+            <svg id="spkPlayIcon" width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          </button>
+          <span class="range" id="spkTime">0.00s / 0.00s</span>
+        </div>
+      </div>
+    </div>
+
+    <details class="fold emo-fold">
+      <summary>情感控制 <span class="q" title="默认与音色参考音频相同；可切换情感参考音频 / 向量 / 描述文本">?</span></summary>
+      <select id="emoMode">
+        <option value="0" selected>与音色参考音频相同</option>
+        <option value="1">使用情感参考音频</option>
+        <option value="2">使用情感向量控制</option>
+        <option value="3">使用情感描述文本（实验）</option>
+      </select>
+
+      <div id="emoAudioBox" class="emo-box" hidden>
+        <label class="drop slim" id="emoDrop">
+          <input type="file" id="emoFile" accept="audio/*,.wav,.mp3,.flac,.ogg">
+          <span class="drop-main" id="emoName">点击选择情感参考音频</span>
+          <span class="drop-sub">表达目标情绪的音频片段</span>
+        </label>
+      </div>
+
+      <div id="emoVecBox" class="emo-box" hidden>
+        <div class="vec-grid" id="vecs"></div>
+      </div>
+
+      <div id="emoTextBox" class="emo-box" hidden>
+        <input type="text" id="emoText" placeholder="例如：委屈巴巴、危险在悄悄逼近">
+        <div class="hint-line">实验功能，生成结果可能不稳定</div>
+      </div>
+
+      <div class="slider emo-w">
+        <label for="emoWeight">情感权重 <span>emo_alpha</span></label>
+        <div class="srow"><input type="range" id="emoWeight" min="0" max="1" step="0.01" value="0.65"><output id="emoWeightOut">0.65</output></div>
+      </div>
+      <label class="switch"><input type="checkbox" id="emoRandom"><span class="tk"></span>情感随机采样</label>
+    </details>
+
+    <details class="fold">
+      <summary>高级参数 <span class="q" title="采样参数保持默认即可，生成效果更稳定">?</span></summary>
+      <label class="chk"><input type="checkbox" id="doSample" checked> do_sample <span>采样模式</span></label>
+      <div class="slider"><label for="temperature">采样温度 <span>temperature</span></label><div class="srow"><input type="range" id="temperature" min="0.1" max="2" step="0.05" value="0.8"><output id="temperatureOut">0.80</output></div></div>
+      <div class="slider"><label for="topP">核采样 <span>top_p</span></label><div class="srow"><input type="range" id="topP" min="0" max="1" step="0.01" value="0.8"><output id="topPOut">0.80</output></div></div>
+      <div class="slider"><label for="topK">候选数 <span>top_k</span></label><div class="srow"><input type="range" id="topK" min="1" max="100" step="1" value="30"><output id="topKOut">30</output></div></div>
+      <div class="slider"><label for="numBeams">束搜索宽度 <span>num_beams</span></label><div class="srow"><input type="range" id="numBeams" min="1" max="10" step="1" value="3"><output id="numBeamsOut">3</output></div></div>
+      <div class="slider"><label for="maxMel">最大 Mel Token <span>max_mel_tokens</span></label><div class="srow"><input type="range" id="maxMel" min="50" max="1815" step="10" value="1500"><output id="maxMelOut">1500</output></div></div>
+      <div class="grid-num">
+        <div><label for="repPen">重复惩罚 <span>repetition_penalty</span></label><input type="number" id="repPen" min="0.1" max="20" step="0.1" value="10"></div>
+        <div><label for="lenPen">长度惩罚 <span>length_penalty</span></label><input type="number" id="lenPen" min="-2" max="2" step="0.1" value="0"></div>
+      </div>
+      <div class="slider"><label for="segTokens">分句最大 Token <span>max_text_tokens_per_segment</span></label><div class="srow"><input type="range" id="segTokens" min="20" max="600" step="2" value="120"><output id="segTokensOut">120</output></div></div>
+      <button class="linkbtn" id="resetParams" type="button">恢复推荐默认值</button>
+    </details>
+
+    <details class="fold">
+      <summary>术语读音 <span class="q" title="自定义个别专业术语的读音，如 IndexTTS2">?</span></summary>
+      <div class="gl-add">
+        <input type="text" id="glTerm" placeholder="术语（如 IndexTTS2）">
+        <input type="text" id="glZh" placeholder="中文读法">
+        <input type="text" id="glEn" placeholder="英文读法">
+        <button class="btn ghost mini" id="btnAddTerm" type="button">添加</button>
+      </div>
+      <div class="gl-error" id="glError" hidden></div>
+      <div class="gl-table" id="glTable"></div>
+    </details>
+
+    <!-- main CTA pinned at panel bottom -->
+    <div class="cta">
+      <div class="gen-summary mono" id="genSummary"></div>
+      <button class="btn primary big" id="genBtn">
+        <svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        生成语音
+      </button>
+      <div class="hint mono" id="loadHint" role="status" aria-live="polite"></div>
+    </div>
+  </section>
+
+  <!-- ===== right: result showcase ===== -->
+  <section class="card resultcard" id="resultCard">
+
+    <!-- idle -->
+    <div class="ph" id="emptyHint">
+      <div class="ph-disc">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </div>
+      <div class="ph-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="ph-text">还没有生成的音频</div>
+      <div class="ph-est mono" id="estDurEcho">输入文本后这里会显示分句预览</div>
+    </div>
+
+    <!-- loading -->
+    <div class="sc-loading" id="loadingBox" hidden>
+      <div class="spinner"></div>
+      <div class="sc-info">
+        <div class="sc-stage" id="pStage">准备中…</div>
+        <div class="pbar"><i id="pbarFill"></i></div>
+        <div class="pmeta"><span class="mono" id="pStageMeta"></span><b class="mono" id="pElapsed">0.0s</b></div>
+        <div class="psteps" id="pSteps">
+          <span class="pstep" data-s="0">模型加载</span><i></i>
+          <span class="pstep" data-s="1">参考特征</span><i></i>
+          <span class="pstep" data-s="2">GPT 生成</span><i></i>
+          <span class="pstep" data-s="3">声学合成</span><i></i>
+          <span class="pstep" data-s="4">声码解码</span>
+        </div>
+      </div>
+    </div>
+    <div class="err" id="errBox"></div>
+
+    <!-- result -->
+    <div id="resultBody" style="display:none">
+      <div class="bigplayer">
+        <button class="iconbtn bigp" id="bigPlay" aria-label="播放或暂停">
+          <svg id="bigPlayIcon" width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        </button>
+        <div class="bp-main">
+          <canvas id="waveTrim" aria-label="音频波形，拖拽选择剪辑范围"></canvas>
+          <div class="bp-meta">
+            <span class="range mono" id="trimRange">—</span>
+            <span class="mono" id="genMeta"></span>
+          </div>
+          <audio id="player" controls hidden></audio>
+        </div>
+      </div>
+      <div class="trim-hint">在波形上按下拖动选择要保留的片段</div>
+      <div class="result-actions">
+        <button class="btn ghost" id="playSel">播放选中</button>
+        <button class="btn ghost" id="resetSel">重置选择</button>
+        <button class="btn primary" id="dlBtn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          下载
+        </button>
+      </div>
+      <div class="dl-row"><span class="dl-name" id="dlName"></span></div>
+    </div>
+
+    <!-- preset / example library: secondary, bottom -->
+    <div class="history" id="libBox">
+      <div class="lib-head">
+        <div class="lib-tabs" id="libTabs">
+          <button class="libtab cur" data-lib="presets" type="button">预设</button>
+          <button class="libtab" data-lib="examples" type="button">示例</button>
+        </div>
+        <div class="lib-tools" id="libTools">
+          <input type="text" id="libSearch" placeholder="搜索名称…">
+          <button class="btn ghost mini" id="btnLibRefresh" type="button">刷新</button>
+          <button class="btn ghost mini" id="btnLibSave" type="button" title="把左侧当前参数与参考音频保存为预设">保存当前为预设</button>
+        </div>
+      </div>
+      <div class="hist-list" id="libList"></div>
+    </div>
+  </section>
+
+  <!-- ===== right sidebar: this-run generation history ===== -->
+  <aside class="card histbar" id="histBar">
+    <button class="hb-rail" id="histToggle" type="button" aria-label="展开生成历史" title="展开生成历史">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
+      <span class="hb-rail-label">生成历史</span>
+      <span class="hb-rail-count mono" id="histRailCount">0</span>
+    </button>
+    <div class="hb-body">
+      <div class="hb-head">
+        <span class="hb-title">生成历史</span>
+        <span class="hb-badge mono" id="histCount">0</span>
+        <button class="iconbtn hb-collapse" id="histCollapse" type="button" aria-label="收起侧边栏" title="收起">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>
+        </button>
+      </div>
+      <div class="hb-note" id="histNote">本次运行生成 · 自动清理保留最近 20 条</div>
+      <div class="hb-list" id="histList"></div>
+      <div class="hb-foot">
+        <label class="switch hb-switch"><input type="checkbox" id="histAuto" checked><span class="tk"></span>自动清理</label>
+        <button class="linkbtn hb-clear" id="histClear" type="button">清空</button>
+      </div>
+    </div>
+  </aside>
+  </div><!-- /page gen -->
+  <!-- ============ 页面 2：预设管理 ============ -->
+  <div class="page" data-page="presets" hidden>
+    <section class="card mg-card">
+
+      <div class="mg-grid">
+        <!-- 左：预设卡片流 -->
+        <div class="mg-col wide-col">
+          <div class="mg-grid-head">
+            <h2 class="mg-h">预设列表</h2>
+            <div class="pm-tools">
+              <input type="text" id="pmSearch" placeholder="搜索预设名称…">
+              <button class="btn ghost mini" id="btnPmRefresh" type="button">刷新</button>
+            </div>
+          </div>
+          <div class="pm-cards" id="pmCards"></div>
+          <div class="mg-hint" id="pmHint"></div>
+        </div>
+
+        <!-- 右：从当前状态创建 -->
+        <div class="mg-col">
+          <h2 class="mg-h">从当前状态创建</h2>
+          <div class="preset-row wide">
+            <input type="text" id="pmName" placeholder="请输入预设名称">
+            <button class="btn primary mini" id="btnPmCreate" type="button">创建</button>
+          </div>
+          <div class="mg-hint">
+            保存「语音合成」页当前的情感控制、采样参数与参考音频。
+            音色 / 情感音频随预设一起保存，应用时自动回填。
+          </div>
+          <h2 class="mg-h" style="margin-top:18px">预设说明</h2>
+          <div class="mg-hint">
+            预设存放在服务端，跨会话可用；删除操作不可恢复，请谨慎操作。
+            预设较多时可用上方搜索框按名称过滤。
+          </div>
+        </div>
+      </div>
+
+    </section>
+  </div><!-- /page presets -->
+
+  <!-- ============ 页面 3：模型管理 ============ -->
+  <div class="page" data-page="model" hidden>
+    <section class="card mg-card">
+
+      <div class="mg-grid">
+        <!-- 左：状态与操作 -->
+        <div class="mg-col">
+          <h2 class="mg-h">模型状态</h2>
+          <div class="kv">
+            <span>加载状态</span><b class="mono" id="mmState">–</b>
+          </div>
+          <pre class="preset-detail wide" id="mmRuntime">–</pre>
+          <div class="mg-btnrow">
+            <button class="btn ghost" id="btnModelLoad" type="button">加载模型</button>
+            <button class="btn ghost danger" id="btnModelUnload" type="button">卸载模型</button>
+            <button class="btn primary" id="btnModelRestart" type="button">重启并应用配置</button>
+          </div>
+          <div class="err" id="mmErr"></div>
+          <div class="mg-hint">
+            卸载 / 重启会在当前生成完成后执行；两项半精度开关需重启模型生效；
+            cuDNN 自动调优、扩散步数、CFG 强度保存后立即生效。
+          </div>
+        </div>
+
+        <!-- 右：加速选项 -->
+        <div class="mg-col">
+          <div class="mg-grid-head">
+            <h2 class="mg-h">加速选项</h2>
+            <button class="btn ghost mini" id="btnPresetCfg" type="button" title="开启 s2mel 半精度与 GPT 半精度，关闭 cuDNN 自动调优；扩散步数 25、CFG 强度 0.7">推荐配置</button>
+          </div>
+          <div class="q-legend">
+            <p><span class="qzb near">几乎无损</span>数值有微差，听感基本无区分</p>
+            <p><span class="qzb drop">音质略变</span>有轻微差异，但提速明显</p>
+            <p><span class="qzb warn">⚠ 实测更慢</span>开启后反而更慢，建议保持关闭</p>
+          </div>
+          <label class="switch"><input type="checkbox" id="cfgS2melFp16"><span class="tk"></span>s2mel 扩散半精度<span class="qzb drop">音质略变</span><b class="qinfo" title="实测 180 字文本提速约 32%（最大提速点）；CFM 扩散 FP32→FP16。细节听感可能有轻微差异">ⓘ</b></label>
+          <label class="switch"><input type="checkbox" id="cfgFp16"><span class="tk"></span>GPT 主模型半精度<span class="qzb near">几乎无损</span><b class="qinfo" title="显存减半、推理更快；推荐默认开启">ⓘ</b></label>
+          <label class="switch"><input type="checkbox" id="cfgCudnnBench"><span class="tk"></span>cuDNN 自动调优<span class="qzb warn">⚠ 实测更慢</span><b class="qinfo" title="实测负优化：cuDNN 会为每个新的输入长度重新搜索卷积算法。BigVGAN 单步 3.35s → 97s，整段 38s → 141s（RTF 6.1 → 20.8）。除非音频长度固定不变，否则保持关闭；保存即生效">ⓘ</b></label>
+          <label class="switch"><input type="checkbox" id="cfgW2vFp16"><span class="tk"></span>w2v-bert 语义编码半精度<span class="qzb warn">⚠ 需自测</span><b class="qinfo" title="w2v-bert-2.0 语义编码器转 FP16，约省 1GB 显存，是 8G 卡 OOM 的关键可优化项；转换后请自测音色与可懂度">ⓘ</b></label>
+          <label class="switch"><input type="checkbox" id="cfgQwenFp16"><span class="tk"></span>Qwen 情绪模型半精度<span class="qzb near">现状默认</span><b class="qinfo" title="Qwen 情绪模型 FP16（默认开启，当前加载已是 float16）；关闭可回退 FP32 以便排查音质问题">ⓘ</b></label>
+          <div class="slider mg-slider">
+            <label for="cfgSteps">扩散步数 <span>DIFFUSION_STEPS · 推荐 8~16</span></label>
+            <div class="srow"><input type="range" id="cfgSteps" min="1" max="50" step="1" value="25"><output id="cfgStepsOut">25</output></div>
+          </div>
+          <div class="slider mg-slider">
+            <label for="cfgRate">CFG 强度 <span>CFG_RATE · 0 = 接近 2 倍提速</span></label>
+            <div class="srow"><input type="range" id="cfgRate" min="0" max="1" step="0.01" value="0.7"><output id="cfgRateOut">0.70</output></div>
+          </div>
+          <button class="btn primary mg-save" id="btnCfgSave" type="button">保存配置</button>
+        </div>
+      </div>
+
+    </section>
+  </div><!-- /page model -->
+
+</main>
+
+<footer>模型懒加载：页面秒开，首次生成约需 30~60 秒加载模型 · 深浅色主题跟随系统偏好，可点右上角切换</footer>
+
+<script src="/assets/app.js?v=202609092"></script>
+</body>
+</html>

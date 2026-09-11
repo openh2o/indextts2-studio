@@ -25,7 +25,6 @@ def tts_model():
         cfg_path=str(CONFIG_PATH),
         model_dir=str(CHECKPOINTS_DIR),
         use_fp16=True,
-        use_cuda_kernel=False,
     )
 
 

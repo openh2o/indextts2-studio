@@ -173,7 +173,6 @@ uv sync --all-extras --default-index "https://mirrors.tuna.tsinghua.edu.cn/pypi/
 > 
 > - `--all-extras`：安装全部可选功能。可去除自定义。
 > - `--extra webui`：安装WebUI支持（推荐）。
-> - `--extra deepspeed`：安装DeepSpeed加速。
 
 > [!IMPORTANT]
 > **Windows注意：** DeepSpeed在部分Windows环境较难安装，可去除`--all-extras`。
@@ -217,17 +216,24 @@ uv run tools/gpu_check.py
 
 #### 🌐 Web演示
 
-```bash
-uv run webui.py
+本仓库使用本地增强版 **FastAPI 前端（`server.py`，带实时进度 / 预设管理 / 模型配置）**，取代官方 gradio WebUI：
+
+```bat
+start_server_bg.bat    :: 后台启动，自动打开 http://127.0.0.1:7860，日志写 logs\server_bg.log
 ```
 
 浏览器访问 `http://127.0.0.1:7860` 查看演示。
 
-可通过命令行参数开启FP16推理（降低显存占用）、DeepSpeed加速、CUDA内核编译加速等。可运行以下命令查看所有选项：
+可通过命令行参数开启FP16推理（降低显存占用）与 s2mel 扩散半精度，
+以及 cudnn_benchmark 等。参数集中在 `start_server.bat` 顶部，
+也可在 WebUI「模型管理」页在线切换。
 
-```bash
-uv run webui.py -h
-```
+> 厂商绑定的加速项（`tf32` / `cuda_kernel` / `accel` / `torch_compile` / `deepspeed`）
+> 已于 2026-09-11 整体移除，详见 `docs/ACCELERATION_OPTIONS_zh.md`。
+
+> [!NOTE]
+> 官方老版 gradio WebUI（`webui.py`）不再维护，已归档至 `archive/`；如需仅保留
+> gradio 入口可查看归档文件，本仓以 `server.py` 为主。
 
 祝使用愉快！
 
@@ -247,7 +253,7 @@ PYTHONPATH="$PYTHONPATH:." uv run indextts/infer_v2.py
 
 ```python
 from indextts.infer_v2 import IndexTTS2
-tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False)
 text = "Translate for me, what is a surprise!"
 tts.infer(spk_audio_prompt='examples/voice_01.wav', text=text, output_path="gen.wav", verbose=True)
 ```
@@ -256,7 +262,7 @@ tts.infer(spk_audio_prompt='examples/voice_01.wav', text=text, output_path="gen.
 
 ```python
 from indextts.infer_v2 import IndexTTS2
-tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False)
 text = "酒楼丧尽天良，开始借机竞拍房间，哎，一群蠢货。"
 tts.infer(spk_audio_prompt='examples/voice_07.wav', text=text, output_path="gen.wav", emo_audio_prompt="examples/emo_sad.wav", verbose=True)
 ```
@@ -265,7 +271,7 @@ tts.infer(spk_audio_prompt='examples/voice_07.wav', text=text, output_path="gen.
 
 ```python
 from indextts.infer_v2 import IndexTTS2
-tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False)
 text = "酒楼丧尽天良，开始借机竞拍房间，哎，一群蠢货。"
 tts.infer(spk_audio_prompt='examples/voice_07.wav', text=text, output_path="gen.wav", emo_audio_prompt="examples/emo_sad.wav", emo_alpha=0.9, verbose=True)
 ```
@@ -277,7 +283,7 @@ tts.infer(spk_audio_prompt='examples/voice_07.wav', text=text, output_path="gen.
 
 ```python
 from indextts.infer_v2 import IndexTTS2
-tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False)
 text = "对不起嘛！我的记性真的不太好，但是和你在一起的事情，我都会努力记住的~"
 tts.infer(spk_audio_prompt='examples/voice_09.wav', text=text, output_path="gen.wav", emo_vector=[0, 0, 0.8, 0, 0, 0, 0, 0], use_random=False, verbose=True)
 ```
@@ -286,7 +292,7 @@ tts.infer(spk_audio_prompt='examples/voice_09.wav', text=text, output_path="gen.
 
 ```python
 from indextts.infer_v2 import IndexTTS2
-tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False)
 text = "快躲起来！是他要来了！他要来抓我们了！"
 tts.infer(spk_audio_prompt='examples/voice_12.wav', text=text, output_path="gen.wav", emo_alpha=0.6, use_emo_text=True, use_random=False, verbose=True)
 ```
@@ -295,7 +301,7 @@ tts.infer(spk_audio_prompt='examples/voice_12.wav', text=text, output_path="gen.
 
 ```python
 from indextts.infer_v2 import IndexTTS2
-tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False)
 text = "快躲起来！是他要来了！他要来抓我们了！"
 emo_text = "你吓死我了！你是鬼吗？"
 tts.infer(spk_audio_prompt='examples/voice_12.wav', text=text, output_path="gen.wav", emo_alpha=0.6, use_emo_text=True, emo_text=emo_text, use_random=False, verbose=True)

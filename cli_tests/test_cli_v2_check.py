@@ -418,10 +418,6 @@ class SynthCommandTests(unittest.TestCase):
                         "model_dir": str(temp_path / "checkpoints"),
                         "use_fp16": False,
                         "device": None,
-                        "use_cuda_kernel": False,
-                        "use_deepspeed": False,
-                        "use_accel": False,
-                        "use_torch_compile": False,
                     },
                 ),
                 (
@@ -1191,10 +1187,6 @@ class SynthCommandTests(unittest.TestCase):
                     "--device",
                     "cuda:0",
                     "--fp16",
-                    "--deepspeed",
-                    "--cuda-kernel",
-                    "--accel",
-                    "--torch-compile",
                     "--verbose",
                 ],
             )
@@ -1209,10 +1201,6 @@ class SynthCommandTests(unittest.TestCase):
                 "model_dir": str(model_dir),
                 "use_fp16": True,
                 "device": "cuda:0",
-                "use_cuda_kernel": True,
-                "use_deepspeed": True,
-                "use_accel": True,
-                "use_torch_compile": True,
             },
         )
         self.assertTrue(calls[1][1]["verbose"])

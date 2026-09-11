@@ -29,6 +29,15 @@ desktop.ini
 /checkpoints/*
 !/checkpoints/*.yaml
 /outputs/
+# 服务端运行时产物：参考音频缓存与日志，仅本机使用
+/prompts/
+/logs/
+# BigVGAN CUDA 扩展的本地编译产物（torch.utils.cpp_extension 生成）
+/indextts/s2mel/modules/bigvgan/alias_free_activation/cuda/build/
+
+# Local tool scratch
+.playwright-cli/
+.workbuddy/
 
 # Example audio files (downloaded on demand, not stored in git)
 /examples/*.wav

@@ -162,8 +162,6 @@ indextts2 config set model_dir D:/models/IndexTTS-2
 | `model_dir` | 持久化模型资源目录。 |
 | `default_device` | 持久化默认运行设备, 例如 `cpu`, `cuda`, `cuda:0`, `mps`, `xpu`。 |
 | `use_fp16` | 持久化是否启用 FP16, 值为 `true` 或 `false`。 |
-| `use_deepspeed` | 持久化是否启用 DeepSpeed, 值为 `true` 或 `false`。 |
-| `use_cuda_kernel` | 持久化是否启用 CUDA kernel, 值为 `true` 或 `false`。 |
 
 普通 `check`, `synth` 和 `batch` 参数只覆盖本次运行, 不会写回持久化配置。配置写入只通过 `indextts2 init --model-dir PATH`, `indextts2 config set KEY VALUE`, 以及成功的 `indextts2 download --model-dir PATH` 完成。`download --no-save` 不写回。
 
@@ -615,13 +613,13 @@ indextts2 concat --concat-file examples/batch/concat-audio.jsonl --output exampl
 单条合成示例:
 
 ```bash
-indextts2 synth --text "运行参数示例。" --voice examples/voice_01.wav --output outputs/runtime.wav --device cuda:0 --fp16 --deepspeed --cuda-kernel --verbose
+indextts2 synth --text "运行参数示例。" --voice examples/voice_01.wav --output outputs/runtime.wav --device cuda:0 --fp16 --verbose
 ```
 
 批量合成示例:
 
 ```bash
-indextts2 batch --batch-file examples/batch/demo.jsonl --voice examples/voice_01.wav --device cuda:0 --fp16 --deepspeed --cuda-kernel --verbose
+indextts2 batch --batch-file examples/batch/demo.jsonl --voice examples/voice_01.wav --device cuda:0 --fp16 --verbose
 ```
 
 批量合成后拼接示例:
@@ -637,13 +635,11 @@ indextts2 batch --batch-file examples/batch/batch-concat.jsonl --voice examples/
 | `--model-dir PATH` | 本次运行使用的模型资源目录, 覆盖 `INDEXTTS2_MODEL_DIR`, 持久化配置和平台默认值。 |
 | `--device DEVICE` | 本次运行设备, 例如 `cpu`, `cuda`, `cuda:0`, `mps`, `xpu`; 未传时可使用持久化配置 `default_device`。 |
 | `--fp16` / `--no-fp16` | 本次运行是否启用 FP16 半精度推理; 未传时可使用持久化配置 `use_fp16`。 |
-| `--deepspeed` / `--no-deepspeed` | 本次运行是否启用 DeepSpeed; 未传时可使用持久化配置 `use_deepspeed`。 |
-| `--cuda-kernel` / `--no-cuda-kernel` | 本次运行是否启用 CUDA kernel 路径; 未传时可使用持久化配置 `use_cuda_kernel`。 |
 | `--verbose` | 显示模型运行输出, 并向 `IndexTTS2.infer` 传入 `verbose=True`。 |
 
 默认情况下, CLI 会隐藏模型初始化和推理过程中的普通标准输出。`synth` 成功后打印 `Generated: <path>`; `batch` 每条成功任务打印 `Generated: <path>`, 全部成功后再打印 `Batch complete: <n> tasks generated`。需要调试时使用 `--verbose`。
 
-`concat` 不加载模型, 因此不支持 `--model-dir`, `--device`, `--fp16`, `--deepspeed`, `--cuda-kernel` 或 `--verbose`。
+`concat` 不加载模型, 因此不支持 `--model-dir`, `--device`, `--fp16` 或 `--verbose`。
 
 ## 参数速查
 
@@ -659,7 +655,7 @@ indextts2 batch --batch-file examples/batch/batch-concat.jsonl --voice examples/
 | --- | --- |
 | `indextts2 config path` | 输出持久化配置文件位置。 |
 | `indextts2 config get` | 输出当前持久化配置。 |
-| `indextts2 config set KEY VALUE` | 写入一个配置值。`KEY` 可为 `model_dir`, `default_device`, `use_fp16`, `use_deepspeed`, `use_cuda_kernel`。 |
+| `indextts2 config set KEY VALUE` | 写入一个配置值。`KEY` 可为 `model_dir`, `default_device`, `use_fp16`。 |
 
 ### `indextts2 download`
 
@@ -693,8 +689,6 @@ indextts2 batch --batch-file examples/batch/batch-concat.jsonl --voice examples/
 | `--model-dir PATH` | 否 | 解析后的模型资源目录 | 本次合成使用的 IndexTTS2 模型资源目录。 |
 | `--device DEVICE` | 否 | 持久化配置或无 | 运行设备。 |
 | `--fp16` / `--no-fp16` | 否 | 持久化配置或 `False` | 启用或禁用 FP16 推理。 |
-| `--deepspeed` / `--no-deepspeed` | 否 | 持久化配置或 `False` | 启用或禁用 DeepSpeed。 |
-| `--cuda-kernel` / `--no-cuda-kernel` | 否 | 持久化配置或 `False` | 启用或禁用 CUDA kernel。 |
 | `--verbose` | 否 | `False` | 显示详细运行输出。 |
 
 ### `indextts2 batch`
@@ -717,8 +711,6 @@ indextts2 batch --batch-file examples/batch/batch-concat.jsonl --voice examples/
 | `--model-dir PATH` | 否 | 解析后的模型资源目录 | 本次批量合成使用的 IndexTTS2 模型资源目录。 |
 | `--device DEVICE` | 否 | 持久化配置或无 | 运行设备。 |
 | `--fp16` / `--no-fp16` | 否 | 持久化配置或 `False` | 启用或禁用 FP16 推理。 |
-| `--deepspeed` / `--no-deepspeed` | 否 | 持久化配置或 `False` | 启用或禁用 DeepSpeed。 |
-| `--cuda-kernel` / `--no-cuda-kernel` | 否 | 持久化配置或 `False` | 启用或禁用 CUDA kernel。 |
 | `--verbose` | 否 | `False` | 显示详细运行输出。 |
 
 ### `indextts2 concat`

@@ -46,10 +46,6 @@ PERSISTED_CONFIG_KEYS = (
     "model_dir",
     "default_device",
     "use_fp16",
-    "use_deepspeed",
-    "use_cuda_kernel",
-    "use_accel",
-    "use_torch_compile",
 )
 
 
@@ -190,10 +186,6 @@ def _build_parser():
     batch.add_argument("--keep-temp", action="store_true", help="Keep internal batch concat temporary files")
     batch.add_argument("--device", default=None, help="Runtime device")
     batch.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=None, help="Use FP16 inference")
-    batch.add_argument("--deepspeed", action=argparse.BooleanOptionalAction, default=None, help="Use DeepSpeed")
-    batch.add_argument("--cuda-kernel", action=argparse.BooleanOptionalAction, default=None, help="Use CUDA kernel")
-    batch.add_argument("--accel", action=argparse.BooleanOptionalAction, default=None, help="Use GPT2 acceleration engine")
-    batch.add_argument("--torch-compile", action=argparse.BooleanOptionalAction, default=None, help="Use torch.compile for s2mel optimization")
     batch.add_argument("--verbose", action="store_true", help="Show verbose inference output")
     batch.add_argument("--voice", help="Default speaker reference audio for every batch task")
     batch.add_argument("--emotion-audio", help="Default emotion reference audio for every batch task")
@@ -245,10 +237,6 @@ def _build_parser():
     )
     synth.add_argument("--device", default=None, help="Runtime device")
     synth.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=None, help="Use FP16 inference")
-    synth.add_argument("--deepspeed", action=argparse.BooleanOptionalAction, default=None, help="Use DeepSpeed")
-    synth.add_argument("--cuda-kernel", action=argparse.BooleanOptionalAction, default=None, help="Use CUDA kernel")
-    synth.add_argument("--accel", action=argparse.BooleanOptionalAction, default=None, help="Use GPT2 acceleration engine")
-    synth.add_argument("--torch-compile", action=argparse.BooleanOptionalAction, default=None, help="Use torch.compile for s2mel optimization")
     synth.add_argument("--verbose", action="store_true", help="Show verbose inference output")
     return parser
 
@@ -287,7 +275,7 @@ def _run_config(args):
             _save_persisted_config(config)
             print(f"{args.key} = {args.value}")
             return EXIT_SUCCESS
-        if args.key in {"use_fp16", "use_deepspeed", "use_cuda_kernel", "use_accel", "use_torch_compile"}:
+        if args.key == "use_fp16":
             value = _parse_config_bool(args.value)
             if value is None:
                 print(f"ERROR: {args.key} must be true or false", file=sys.stderr)
@@ -379,40 +367,7 @@ def _resolve_runtime_options(args):
     return argparse.Namespace(
         device=args.device if args.device is not None else config.get("default_device"),
         fp16=args.fp16 if args.fp16 is not None else bool(config.get("use_fp16", False)),
-        deepspeed=args.deepspeed if args.deepspeed is not None else bool(config.get("use_deepspeed", False)),
-        cuda_kernel=args.cuda_kernel
-        if args.cuda_kernel is not None
-        else bool(config.get("use_cuda_kernel", False)),
-        accel=args.accel if args.accel is not None else bool(config.get("use_accel", False)),
-        torch_compile=args.torch_compile
-        if args.torch_compile is not None
-        else bool(config.get("use_torch_compile", False)),
     )
-
-
-def _validate_optional_dependencies(runtime):
-    """Fail fast when acceleration flags are set but optional dependencies are missing."""
-    if runtime.accel:
-        try:
-            importlib.import_module("flash_attn")
-        except ImportError:
-            print(
-                "ERROR: --accel requires flash-attn, which is not installed. "
-                "Install it with: uv sync --extra accel",
-                file=sys.stderr,
-            )
-            return EXIT_RUNTIME_UNAVAILABLE
-    if runtime.torch_compile:
-        try:
-            importlib.import_module("triton")
-        except ImportError:
-            print(
-                "ERROR: --torch-compile requires triton, which is not installed. "
-                "Install it with: uv sync --extra torch_compile",
-                file=sys.stderr,
-            )
-            return EXIT_RUNTIME_UNAVAILABLE
-    return None
 
 
 def _load_persisted_config():
@@ -555,9 +510,6 @@ def _run_synth(args, tts_factory=None, stdin=None):
     if missing_exit_code is not None:
         return EXIT_MISSING_RESOURCE
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    missing_dep_exit = _validate_optional_dependencies(runtime)
-    if missing_dep_exit is not None:
-        return missing_dep_exit
     if tts_factory is None:
         try:
             tts_factory = _load_indextts2(model_dir)
@@ -570,11 +522,9 @@ def _run_synth(args, tts_factory=None, stdin=None):
                 cfg_path=str(model_dir / "config.yaml"),
                 model_dir=str(model_dir),
                 use_fp16=runtime.fp16,
+                use_w2v_fp16=runtime.w2v_fp16,
+                use_qwen_fp16=runtime.qwen_fp16,
                 device=runtime.device,
-                use_cuda_kernel=runtime.cuda_kernel,
-                use_deepspeed=runtime.deepspeed,
-                use_accel=runtime.accel,
-                use_torch_compile=runtime.torch_compile,
             )
             infer_kwargs = {
                 "spk_audio_prompt": str(voice_path),
@@ -628,9 +578,6 @@ def _run_batch(args, tts_factory=None):
         else:
             print(f"Batch file OK: {len(tasks)} tasks")
         return EXIT_SUCCESS
-    missing_dep_exit = _validate_optional_dependencies(runtime)
-    if missing_dep_exit is not None:
-        return missing_dep_exit
     if tts_factory is None:
         try:
             tts_factory = _load_indextts2(model_dir)
@@ -644,11 +591,9 @@ def _run_batch(args, tts_factory=None):
                 cfg_path=str(model_dir / "config.yaml"),
                 model_dir=str(model_dir),
                 use_fp16=runtime.fp16,
+                use_w2v_fp16=runtime.w2v_fp16,
+                use_qwen_fp16=runtime.qwen_fp16,
                 device=runtime.device,
-                use_cuda_kernel=runtime.cuda_kernel,
-                use_deepspeed=runtime.deepspeed,
-                use_accel=runtime.accel,
-                use_torch_compile=runtime.torch_compile,
             )
     except Exception as exc:
         print(f"ERROR: inference failed: {exc}", file=sys.stderr)

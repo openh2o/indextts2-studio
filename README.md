@@ -1,5 +1,89 @@
 
 
+# IndexTTS2 · 本地增强版（本仓库定制）
+
+> 本仓库在官方 IndexTTS2 基础上做了一系列本地化改造：用轻量 **FastAPI 前端（`server.py`）** 替代 gradio WebUI，并新增多项实用功能与生成进度反馈。以下是本仓库的定制说明与使用方式。
+
+## 一、核心优化
+
+### 1. 秒启动 · 空闲零显存
+- 服务启动只加载轻组件（配置、文本规范器、tokenizer），毫秒级完成。
+- 主 TTS 模型**懒加载**：首次 `/tts` 请求时才加载进显存（30~60 秒，界面有进度提示）；空闲时显存占用为 0。
+
+### 2. 生成过程实时进度（SSE 流式推送）
+- 生成进度通过 Server-Sent Events 实时推送到前端，进度条 + 阶段文字 + 百分比 + 等待秒数。
+- 阶段覆盖：**模型加载**（未加载时显示，封顶 30%）→ 启动推理 → **参考音频特征提取** → 文本分词分段 → **逐段语音合成**（gpt 生成内部逐 token 钩子）→ 解码合成音频 → 完成。
+- **五步阶段状态面板**：进度条下方实时显示 5 个关键步骤（模型加载 → 参考音频特征 → GPT 语音生成 → 声学模型合成 → 声码器解码），每步有 **等待 / 运行 / 完成** 三态（运行高亮呼吸动画，完成变绿），多段语音时自动循环切换。
+- **动态自校准权重**：段内各子阶段（gpt 生成 / gpt 前向 / s2mel / bigvgan）耗时占比随每次生成自动 EMA 统计更新，进度比例逐步贴合本机真实耗时。
+- **防卡顿动画**：长时间无进度事件时进度条缓慢爬升，真实事件一到即校准回真实值。
+- 生成完成后展示"耗时 X 秒"。
+
+### 3. 声纹波形 · 可拖动播放
+- 参考音频与生成结果均渲染声纹波形。
+- **点击 / 拖动波形即可跳转播放进度**（支持鼠标与触控，拖出画布外仍跟手），悬停有跟随线提示。
+- **播放进度平滑动画**：播放线由 `requestAnimationFrame` 每帧驱动（60fps 丝滑跟随，替代浏览器低频的 `timeupdate` 事件）；波形静态层缓存到离屏 canvas，播放时仅叠加进度线，性能开销极小；切换主题时波形颜色自动同步。
+
+### 4. 深色 / 浅色双主题
+- 默认深色主题，顶栏圆形日/月按钮一键切换，选择记住在浏览器（localStorage）。
+
+## 二、新增功能
+
+| 功能 | 说明 |
+| --- | --- |
+| 预设系统 | 将参考音频 + 全部参数保存为预设（`outputs/presets/<名称>/`，含音频副本），一键回填复用；支持列表 / 详情 / 删除，兼容旧预设 |
+| 示例系统 | 内置 11 条示例（`examples/cases.jsonl`），点击即填充文本与参数，含情感模式 3 实验示例 |
+| 8 维情感向量 | 滑块组直控 8 维情感向量，并叠加权重缩放 |
+| 分句预览 | 输入文本实时分句预览（300ms 防抖） |
+| 术语词汇表 | 自定义术语与读音映射，YAML 持久化（`checkpoints/glossary.yaml`） |
+| 实验功能开关 | 显示实验开关后解锁"情感文本模式（模式3）"与实验示例过滤 |
+| 作者 B 站入口 | 顶栏胶囊按钮一键直达作者 B 站空间（新标签打开） |
+| 文件命名规则 | 独立的"文件命名"设置块（默认展开）可选"目标文本前15字_时间戳 / 目标文本前15字 / spk_时间戳"，自动清洗非法字符、去重防覆盖，支持一键下载 |
+
+情感模式：`0` 跟随说话人 / `1` 参考音频 / `2` 情感向量 / `3` 情感文本（实验）。
+
+## 三、使用方式（新）
+
+### 环境要求
+- Windows 10/11，NVIDIA GPU（CUDA 12.8 驱动），约 16 GB 磁盘（模型权重 + Python 环境）
+- `uv` + Python 3.11（本项目 PyTorch `2.8.0+cu128` 为手动安装，非 uv 管理，请用 `uv run --no-sync` 运行）
+
+### 启动
+```bat
+start_server_bg.bat     :: 后台启动（自动打开浏览器，日志写 logs\server_bg.log）
+```
+- 服务地址：`http://127.0.0.1:7860`（`start_*.bat` 已内嵌 `HF_ENDPOINT=https://hf-mirror.com` 国内镜像）
+- 停止后台服务：
+  ```powershell
+  powershell -Command "Get-NetTCPConnection -LocalPort 7860 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }"
+  ```
+
+### 页面操作
+1. **音频生成 Tab**：上传参考音频（音色 / 情感参考）→ 输入文本 → 调情感模式 / 向量 / 高级参数 → 点"生成语音"，观察实时进度条。
+2. **预设管理 Tab**：保存当前配置为预设、一键加载、删除。
+3. 切换主题、试示例、管理术语词汇表。
+
+### HTTP API
+| 端点 | 说明 |
+| --- | --- |
+| `GET /health` | 健康检查，含模型是否已加载 |
+| `POST /tts` | 生成语音，**SSE 流式响应**（`load` / `progress` / `done` / `error` 事件，`progress` 携带进度值与阶段描述） |
+| `GET /audio/{name}` | 获取生成的音频文件 |
+| `GET|POST /presets`、`GET|DELETE /presets/{name}` | 预设列表 / 保存 / 详情 / 删除 |
+| `GET /presets/{name}/audio/{kind}` | 预设备份音频（`spk` / `emo`） |
+| `GET /examples*` | 示例列表 / 播放示例音频 |
+| `POST /segments` | 文本分句预览 |
+| `GET|POST /glossary` | 术语词汇表读写 |
+
+## 四、绿色版打包（免安装分发）
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File build_portable.ps1
+```
+生成 `dist\IndexTTS2_portable\`（含便携 Python + 依赖 + 模型 + 启动脚本，约 16 GB），目标机解压后双击 `start_server_bg.bat` 即可运行，无需安装 Python / uv。压缩为 zip 发送可参考脚本生成的 `README.txt`。
+
+---
+**以下是官方原版 README（模型原理与更多使用细节）** ↓
+
 <div align="center">
 <img src='assets/index_icon.png' width="250"/>
 </div>
@@ -199,14 +283,7 @@ uv sync --all-extras --default-index "https://mirrors.tuna.tsinghua.edu.cn/pypi/
 > - `--all-extras`: Automatically adds *every* extra feature listed below. You can
 >   remove this flag if you want to customize your installation choices.
 > - `--extra webui`: Adds WebUI support (recommended).
-> - `--extra deepspeed`: Adds DeepSpeed support (may speed up inference on some
->   systems).
-> - `--extra accel`: Adds the GPT2 flash-attention acceleration engine. On Windows
->   you must provide a compatible prebuilt `flash-attn` wheel yourself (see the
->   **Windows Acceleration** note below).
-> - `--extra torch_compile`: Adds `triton` support so the s2mel flow model can be
->   compiled with `torch.compile`. Windows support requires the community
->   `triton-windows` package.
+> - `--extra test`: Adds `pytest` for the test suite.
 
 > [!IMPORTANT]
 > **Important (Windows):** The DeepSpeed library may be difficult to install for
@@ -263,36 +340,25 @@ uv run tools/gpu_check.py
 
 ### 🔥 IndexTTS2 Quickstart
 
-#### 🌐 Web Demo
+#### 🌐 Web 演示（本地版）
 
-```bash
-uv run webui.py
+本仓库使用本地增强版 **FastAPI 前端（`server.py`，带实时进度 / 预设管理 / 模型配置）**，取代官方 gradio WebUI：
+
+```bat
+start_server_bg.bat    :: 后台启动，自动打开 http://127.0.0.1:7860，日志写 logs\server_bg.log
 ```
 
-Open your browser and visit `http://127.0.0.1:7860` to see the demo.
+启动加速参数（FP16 / s2mel FP16 / cudnn_benchmark / diffusion_steps / cfg_rate）
+可在 `start_server.bat` 顶部编辑，或在 WebUI「模型管理」页在线切换：
 
-You can also adjust the settings to enable features such as FP16 inference (lower
-VRAM usage), DeepSpeed acceleration, compiled CUDA kernels for speed, etc. All
-available options can be seen via the following command:
+- `--fp16` / `--s2mel_fp16`（两项半精度，重启模型后生效）
+- `--cudnn_benchmark`（进程级即时生效；本机实测为负优化，默认关闭）
+- `--diffusion_steps` / `--inference_cfg_rate`（即时生效）
 
-```bash
-uv run webui.py -h
-```
+厂商绑定的加速项（`--tf32` / `--cuda_kernel` / `--accel` / `--torch_compile` / `--deepspeed`）
+已于 2026-09-11 整体移除，详见 `docs/ACCELERATION_OPTIONS_zh.md`。
 
-The following startup flags control optional acceleration features. They are
-chosen when the server starts and cannot be toggled from the WebUI:
-
-- `--accel`: Enable the GPT2 flash-attention acceleration engine. Requires the
-  `accel` extra (i.e. `flash-attn`) to be installed.
-- `--torch_compile`: Compile the s2mel flow model with `torch.compile`. Requires
-  the `torch_compile` extra (i.e. `triton`) to be installed.
-- `--fp16`: Use half-precision inference (faster and lower VRAM usage).
-
-Example with all accelerations enabled:
-
-```bash
-uv run webui.py --fp16 --accel --torch_compile
-```
+官方老版 gradio WebUI（`webui.py`）不再维护，已归档至 `archive/`。
 
 Have fun!
 
@@ -329,7 +395,7 @@ Here are several examples of how to use IndexTTS2 in your own scripts:
 
 ```python
 from indextts.infer_v2 import IndexTTS2
-tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False)
 text = "Translate for me, what is a surprise!"
 tts.infer(spk_audio_prompt='examples/voice_01.wav', text=text, output_path="gen.wav", verbose=True)
 ```
@@ -338,7 +404,7 @@ tts.infer(spk_audio_prompt='examples/voice_01.wav', text=text, output_path="gen.
 
 ```python
 from indextts.infer_v2 import IndexTTS2
-tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False)
 text = "酒楼丧尽天良，开始借机竞拍房间，哎，一群蠢货。"
 tts.infer(spk_audio_prompt='examples/voice_07.wav', text=text, output_path="gen.wav", emo_audio_prompt="examples/emo_sad.wav", verbose=True)
 ```
@@ -349,7 +415,7 @@ tts.infer(spk_audio_prompt='examples/voice_07.wav', text=text, output_path="gen.
 
 ```python
 from indextts.infer_v2 import IndexTTS2
-tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False)
 text = "酒楼丧尽天良，开始借机竞拍房间，哎，一群蠢货。"
 tts.infer(spk_audio_prompt='examples/voice_07.wav', text=text, output_path="gen.wav", emo_audio_prompt="examples/emo_sad.wav", emo_alpha=0.9, verbose=True)
 ```
@@ -367,7 +433,7 @@ tts.infer(spk_audio_prompt='examples/voice_07.wav', text=text, output_path="gen.
 
 ```python
 from indextts.infer_v2 import IndexTTS2
-tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False)
 text = "对不起嘛！我的记性真的不太好，但是和你在一起的事情，我都会努力记住的~"
 tts.infer(spk_audio_prompt='examples/09.wav', text=text, output_path="gen.wav", emo_vector=[0, 0, 0.8, 0, 0, 0, 0, 0], use_random=False, verbose=True)
 ```
@@ -382,7 +448,7 @@ tts.infer(spk_audio_prompt='examples/09.wav', text=text, output_path="gen.wav", 
 
 ```python
 from indextts.infer_v2 import IndexTTS2
-tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False)
 text = "快躲起来！是他要来了！他要来抓我们了！"
 tts.infer(spk_audio_prompt='examples/voice_12.wav', text=text, output_path="gen.wav", emo_alpha=0.6, use_emo_text=True, use_random=False, verbose=True)
 ```
@@ -394,7 +460,7 @@ tts.infer(spk_audio_prompt='examples/voice_12.wav', text=text, output_path="gen.
 
 ```python
 from indextts.infer_v2 import IndexTTS2
-tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, use_cuda_kernel=False, use_deepspeed=False)
+tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False)
 text = "快躲起来！是他要来了！他要来抓我们了！"
 emo_text = "你吓死我了！你是鬼吗？"
 tts.infer(spk_audio_prompt='examples/voice_12.wav', text=text, output_path="gen.wav", emo_alpha=0.6, use_emo_text=True, emo_text=emo_text, use_random=False, verbose=True)

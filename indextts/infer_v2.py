@@ -1,5 +1,5 @@
 import os
-from subprocess import CalledProcessError
+from contextlib import nullcontext
 
 import json
 import re
@@ -30,14 +30,14 @@ from transformers import AutoTokenizer
 from modelscope import AutoModelForCausalLM
 import safetensors
 from transformers import SeamlessM4TFeatureExtractor
+from transformers.generation.stopping_criteria import StoppingCriteria, StoppingCriteriaList
 import random
 import torch.nn.functional as F
 
 class IndexTTS2:
     def __init__(
             self, cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, device=None,
-            use_cuda_kernel=None,use_deepspeed=False, use_accel=False, use_torch_compile=False,
-            aux_paths=None
+            use_s2mel_fp16=False, use_w2v_fp16=False, use_qwen_fp16=True, aux_paths=None
     ):
         """
         Args:
@@ -45,12 +45,14 @@ class IndexTTS2:
             model_dir (str): path to the model directory.
             use_fp16 (bool): whether to use fp16.
             device (str): device to use (e.g., 'cuda:0', 'cpu'). If None, it will be set automatically based on the availability of CUDA or MPS.
-            use_cuda_kernel (None | bool): whether to use BigVGan custom fused activation CUDA kernel, only for CUDA device.
-            use_deepspeed (bool): whether to use DeepSpeed or not.
-            use_accel (bool): whether to use acceleration engine for GPT2 or not.
-            use_torch_compile (bool): whether to use torch.compile for optimization or not.
+            use_s2mel_fp16 (bool): whether to run the s2mel (diffusion) model in FP16. Speeds up
+                CFM flow-matching inference and cuts VRAM, at the cost of slight quality trade-off.
             aux_paths (dict | None): pre-downloaded auxiliary model paths from ensure_models_available().
                 If None, downloads are performed automatically.
+            use_w2v_fp16 (bool): run the w2v-bert-2.0 semantic encoder in FP16. Saves ~1GB VRAM
+                on 8G cards; default False to avoid any numerical/quality regression.
+            use_qwen_fp16 (bool): run the Qwen emotion model in FP16. Default True (it already
+                loads as float16); set False to fall back to FP32 for debugging.
         """
         # Ensure auxiliary models are available
         if aux_paths is None:
@@ -60,35 +62,34 @@ class IndexTTS2:
         if device is not None:
             self.device = device
             self.use_fp16 = False if device == "cpu" else use_fp16
-            self.use_cuda_kernel = use_cuda_kernel is not None and use_cuda_kernel and device.startswith("cuda")
         elif torch.cuda.is_available():
             self.device = "cuda:0"
             self.use_fp16 = use_fp16
-            self.use_cuda_kernel = use_cuda_kernel is None or use_cuda_kernel
         elif hasattr(torch, "xpu") and torch.xpu.is_available():
             self.device = "xpu"
             self.use_fp16 = use_fp16
-            self.use_cuda_kernel = False
         elif hasattr(torch, "mps") and torch.backends.mps.is_available():
             self.device = "mps"
             self.use_fp16 = False  # Use float16 on MPS is overhead than float32
-            self.use_cuda_kernel = False
         else:
             self.device = "cpu"
             self.use_fp16 = False
-            self.use_cuda_kernel = False
             print(">> Be patient, it may take a while to run in CPU mode.")
 
         self.cfg = OmegaConf.load(cfg_path)
         self.model_dir = model_dir
         self.dtype = torch.float16 if self.use_fp16 else None
         self.stop_mel_token = self.cfg.gpt.stop_mel_token
-        self.use_accel = use_accel
-        self.use_torch_compile = use_torch_compile
+        self.use_s2mel_fp16 = use_s2mel_fp16
+        self.use_w2v_fp16 = use_w2v_fp16
+        self.use_qwen_fp16 = use_qwen_fp16
+        # s2mel CFM 推理参数，可用 generation_kwargs 或实例属性覆盖
+        self.diffusion_steps = 25
+        self.inference_cfg_rate = 0.7
 
-        self.qwen_emo = QwenEmotion(os.path.join(self.model_dir, self.cfg.qwen_emo_path))
+        self.qwen_emo = QwenEmotion(os.path.join(self.model_dir, self.cfg.qwen_emo_path), use_fp16=self.use_qwen_fp16)
 
-        self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
+        self.gpt = UnifiedVoice(**self.cfg.gpt)
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
         load_checkpoint(self.gpt, self.gpt_path)
         self.gpt = self.gpt.to(self.device)
@@ -98,25 +99,7 @@ class IndexTTS2:
             self.gpt.eval()
         print(">> GPT weights restored from:", self.gpt_path)
 
-        if use_deepspeed:
-            try:
-                import deepspeed
-            except (ImportError, OSError, CalledProcessError) as e:
-                use_deepspeed = False
-                print(f">> Failed to load DeepSpeed. Falling back to normal inference. Error: {e}")
-
-        self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16)
-
-        if self.use_cuda_kernel:
-            # preload the CUDA kernel for BigVGAN
-            try:
-                from indextts.s2mel.modules.bigvgan.alias_free_activation.cuda import activation1d
-
-                print(">> Preload custom CUDA kernel for BigVGAN", activation1d.anti_alias_activation_cuda)
-            except Exception as e:
-                print(">> Failed to load custom CUDA kernel for BigVGAN. Falling back to torch.")
-                print(f"{e!r}")
-                self.use_cuda_kernel = False
+        self.gpt.post_init_gpt2_config(kv_cache=True, half=self.use_fp16)
 
         # Load w2v-bert-2.0 from pre-downloaded local dir
         w2v_bert_dir = aux_paths["w2v_bert"]
@@ -128,6 +111,11 @@ class IndexTTS2:
         self.semantic_model.eval()
         self.semantic_mean = self.semantic_mean.to(self.device)
         self.semantic_std = self.semantic_std.to(self.device)
+        if self.use_w2v_fp16 and self.device.startswith(("cuda", "xpu", "mps")):
+            self.semantic_model = self.semantic_model.half()
+            # mean/std stay fp32 (a few MB, negligible): get_emb normalizes in
+            # float32 so the output dtype stays identical to the fp32 path.
+            print(">> w2v-bert converted to FP16")
 
         semantic_codec = build_semantic_codec(self.cfg.semantic_codec)
         semantic_code_ckpt = aux_paths["semantic_codec"]
@@ -148,12 +136,10 @@ class IndexTTS2:
         )
         self.s2mel = s2mel.to(self.device)
         self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
-        
-        # Enable torch.compile optimization if requested
-        if self.use_torch_compile:
-            print(">> Enabling torch.compile optimization")
-            self.s2mel.enable_torch_compile()
-            print(">> torch.compile optimization enabled successfully")
+
+        if self.use_s2mel_fp16 and self.device.startswith(("cuda", "xpu", "mps")):
+            self.s2mel = self.s2mel.half()
+            print(">> s2mel converted to FP16")
         
         self.s2mel.eval()
         print(">> s2mel weights restored from:", s2mel_path)
@@ -168,7 +154,7 @@ class IndexTTS2:
 
         # load BigVGAN from pre-downloaded local dir
         bigvgan_dir = aux_paths["bigvgan"]
-        self.bigvgan = bigvgan.BigVGAN.from_pretrained(bigvgan_dir, use_cuda_kernel=self.use_cuda_kernel)
+        self.bigvgan = bigvgan.BigVGAN.from_pretrained(bigvgan_dir)
         self.bigvgan = self.bigvgan.to(self.device)
         self.bigvgan.remove_weight_norm()
         self.bigvgan.eval()
@@ -220,16 +206,35 @@ class IndexTTS2:
 
         # 进度引用显示（可选）
         self.gr_progress = None
+        # 段内各子阶段耗时占比（gpt生成/gpt前向/s2mel/bigvgan），每次生成后 EMA 自校准
+        self._phase_ema = None
         self.model_version = self.cfg.version if hasattr(self.cfg, "version") else None
+
+    def _phase_w(self):
+        if self._phase_ema is None:
+            return (0.55, 0.07, 0.23, 0.15)
+        return tuple(self._phase_ema)
+
+    def _autocast_s2mel(self):
+        """s2mel（扩散 CFM）的 autocast 上下文：按 use_s2mel_fp16 决定是否 FP16。"""
+        if not self.use_s2mel_fp16:
+            return nullcontext()
+        device_type = self.device.split(":")[0]
+        if device_type not in ("cuda", "cpu", "xpu", "mps", "mtia"):
+            device_type = "cpu"
+        return torch.amp.autocast(device_type=device_type, enabled=True, dtype=torch.float16)
 
     @torch.no_grad()
     def get_emb(self, input_features, attention_mask):
+        # w2v_fp16: feed the input in the model's own dtype (no-op when fp32),
+        # and normalize the output in float32 so downstream dtype is unchanged.
         vq_emb = self.semantic_model(
-            input_features=input_features,
+            input_features=input_features.to(self.semantic_model.dtype),
             attention_mask=attention_mask,
             output_hidden_states=True,
         )
         feat = vq_emb.hidden_states[17]  # (B, T, C)
+        feat = feat.float()
         feat = (feat - self.semantic_mean) / self.semantic_std
         return feat
 
@@ -432,6 +437,8 @@ class IndexTTS2:
             # must always use alpha=1.0 when we don't have an external reference voice
             emo_alpha = 1.0
 
+        self._set_gr_progress(0.05, "reference audio processing...|ref")
+
         # 如果参考音频改变了，才需要重新生成, 提升速度
         if self.cache_spk_cond is None or self.cache_spk_audio_prompt != spk_audio_prompt:
             if self.cache_spk_cond is not None:
@@ -461,10 +468,11 @@ class IndexTTS2:
             feat = feat - feat.mean(dim=0, keepdim=True)  # feat2另外一个滤波器能量组特征[922, 80]
             style = self.campplus_model(feat.unsqueeze(0))  # 参考音频的全局style2[1,192]
 
-            prompt_condition = self.s2mel.models['length_regulator'](S_ref,
-                                                                     ylens=ref_target_lengths,
-                                                                     n_quantizers=3,
-                                                                     f0=None)[0]
+            with self._autocast_s2mel():
+                prompt_condition = self.s2mel.models['length_regulator'](S_ref,
+                                                                         ylens=ref_target_lengths,
+                                                                         n_quantizers=3,
+                                                                         f0=None)[0]
 
             self.cache_spk_cond = spk_cond_emb
             self.cache_s2mel_style = style
@@ -533,6 +541,9 @@ class IndexTTS2:
         repetition_penalty = generation_kwargs.pop("repetition_penalty", 10.0)
         max_mel_tokens = generation_kwargs.pop("max_mel_tokens", 1500)
         sampling_rate = 22050
+        # s2mel CFM 参数：允许通过 generation_kwargs 覆盖实例默认值
+        diffusion_steps = generation_kwargs.pop("diffusion_steps", getattr(self, "diffusion_steps", 25))
+        inference_cfg_rate = generation_kwargs.pop("inference_cfg_rate", getattr(self, "inference_cfg_rate", 0.7))
 
         wavs = []
         gpt_gen_time = 0
@@ -542,8 +553,11 @@ class IndexTTS2:
         has_warned = False
         silence = None # for stream_return
         for seg_idx, sent in enumerate(segments):
-            self._set_gr_progress(0.2 + 0.7 * seg_idx / segments_count,
-                                  f"speech synthesis {seg_idx + 1}/{segments_count}...")
+            seg_lo = 0.2 + 0.7 * seg_idx / segments_count
+            seg_hi = 0.2 + 0.7 * (seg_idx + 1) / segments_count
+            seg_span = seg_hi - seg_lo
+            seg_desc = f"speech synthesis {seg_idx + 1}/{segments_count}..."
+            self._set_gr_progress(seg_lo, seg_desc + "|gpt")
 
             text_tokens = self.tokenizer.convert_tokens_to_ids(sent)
             text_tokens = torch.tensor(text_tokens, dtype=torch.int32, device=self.device).unsqueeze(0)
@@ -569,6 +583,22 @@ class IndexTTS2:
                         emovec = emovec_mat + (1 - torch.sum(weight_vector)) * emovec
                         # emovec = emovec_mat
 
+                    est_gpt_steps = max(1, min(max_mel_tokens, round(text_tokens.shape[1] * 12)))
+
+                    class _MelTokenProgress(StoppingCriteria):
+                        def __init__(s, cb):
+                            s.cb = cb
+                            s.n = 0
+                        def __call__(s, input_ids, scores, **kw):
+                            s.n += 1
+                            if s.n % 10 == 0:
+                                s.cb(min(1.0, s.n / est_gpt_steps))
+                            return False
+
+                    gpt_hook = _MelTokenProgress(
+                        lambda f: self._set_gr_progress(seg_lo + seg_span * self._phase_w()[0] * f, seg_desc + "|gpt")
+                    )
+
                     codes, speech_conditioning_latent = self.gpt.inference_speech(
                         spk_cond_emb,
                         text_tokens,
@@ -585,6 +615,7 @@ class IndexTTS2:
                         num_beams=num_beams,
                         repetition_penalty=repetition_penalty,
                         max_generate_length=max_mel_tokens,
+                        stopping_criteria=StoppingCriteriaList([gpt_hook]),
                         **generation_kwargs
                     )
 
@@ -638,12 +669,10 @@ class IndexTTS2:
                         use_speed=use_speed,
                     )
                     gpt_forward_time += time.perf_counter() - m_start_time
+                    self._set_gr_progress(seg_lo + seg_span * (self._phase_w()[0] + self._phase_w()[1]), seg_desc + "|s2mel")
 
-                dtype = None
-                with torch.amp.autocast(text_tokens.device.type, enabled=dtype is not None, dtype=dtype):
+                with self._autocast_s2mel():
                     m_start_time = time.perf_counter()
-                    diffusion_steps = 25
-                    inference_cfg_rate = 0.7
                     latent = self.s2mel.models['gpt_layer'](latent)
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
                     S_infer = S_infer.transpose(1, 2)
@@ -655,19 +684,30 @@ class IndexTTS2:
                                                                  n_quantizers=3,
                                                                  f0=None)[0]
                     cat_condition = torch.cat([prompt_condition, cond], dim=1)
+                    # s2mel 扩散阶段实时进度：把段内 s2mel 权重区间 (w0+w1, w0+w1+w2) 细分上报，
+                    # desc 带 |s2mel|N/M 扩散步数（旧前端 split("|")[1] 仍取到 "s2mel"，向后兼容）
+                    _w = self._phase_w()
+                    _s2mel_base = seg_lo + seg_span * (_w[0] + _w[1])
+                    _s2mel_span = seg_span * _w[2]
                     vc_target = self.s2mel.models['cfm'].inference(cat_condition,
                                                                    torch.LongTensor([cat_condition.size(1)]).to(
                                                                        cond.device),
                                                                    ref_mel, style, None, diffusion_steps,
-                                                                   inference_cfg_rate=inference_cfg_rate)
+                                                                   inference_cfg_rate=inference_cfg_rate,
+                                                                   progress_cb=lambda f: self._set_gr_progress(
+                                                                       _s2mel_base + _s2mel_span * f,
+                                                                       seg_desc + f"|s2mel|{int(round(f * diffusion_steps))}/{diffusion_steps}"))
                     vc_target = vc_target[:, :, ref_mel.size(-1):]
                     s2mel_time += time.perf_counter() - m_start_time
+                    self._set_gr_progress(seg_lo + seg_span * (self._phase_w()[0] + self._phase_w()[1] + self._phase_w()[2]), seg_desc + "|bigvgan")
 
-                    m_start_time = time.perf_counter()
+                m_start_time = time.perf_counter()
+                with torch.no_grad():
                     wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
-                    print(wav.shape)
-                    bigvgan_time += time.perf_counter() - m_start_time
-                    wav = wav.squeeze(1)
+                print(wav.shape)
+                bigvgan_time += time.perf_counter() - m_start_time
+                self._set_gr_progress(seg_hi, seg_desc + "|bigvgan")
+                wav = wav.squeeze(1)
 
                 wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
                 if verbose:
@@ -689,6 +729,14 @@ class IndexTTS2:
         print(f">> gpt_forward_time: {gpt_forward_time:.2f} seconds")
         print(f">> s2mel_time: {s2mel_time:.2f} seconds")
         print(f">> bigvgan_time: {bigvgan_time:.2f} seconds")
+        phase_tot = gpt_gen_time + gpt_forward_time + s2mel_time + bigvgan_time
+        if phase_tot > 0:
+            cur = (gpt_gen_time / phase_tot, gpt_forward_time / phase_tot,
+                   s2mel_time / phase_tot, bigvgan_time / phase_tot)
+            if self._phase_ema is None:
+                self._phase_ema = list(cur)
+            else:
+                self._phase_ema = [0.7 * a + 0.3 * b for a, b in zip(self._phase_ema, cur)]
         print(f">> Total inference time: {end_time - start_time:.2f} seconds")
         print(f">> Generated audio length: {wav_length:.2f} seconds")
         print(f">> RTF: {(end_time - start_time) / wav_length:.4f}")
@@ -725,12 +773,12 @@ def find_most_similar_cosine(query_vector, matrix):
     return most_similar_index
 
 class QwenEmotion:
-    def __init__(self, model_dir):
+    def __init__(self, model_dir, use_fp16=True):
         self.model_dir = model_dir
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_dir,
-            torch_dtype="float16",  # "auto"
+            torch_dtype="float16" if use_fp16 else "float32",  # "auto"
             device_map="auto"
         )
         self.prompt = "文本情感分类"
@@ -851,8 +899,6 @@ if __name__ == "__main__":
     tts = IndexTTS2(
         cfg_path="checkpoints/config.yaml", 
         model_dir="checkpoints", 
-        use_cuda_kernel=False,
-        use_torch_compile=True
     )
     tts.infer(spk_audio_prompt=prompt_wav, text=text, output_path="gen.wav", verbose=True)
     char_size = 5

@@ -390,7 +390,7 @@ class UnifiedVoice(nn.Module):
         for module in embeddings:
             module.weight.data.normal_(mean=0.0, std=.02)
 
-    def post_init_gpt2_config(self, use_deepspeed=False, kv_cache=False, half=False):
+    def post_init_gpt2_config(self, kv_cache=False, half=False):
         seq_length = self.max_mel_tokens + self.max_text_tokens + 2
         gpt_config = GPT2Config(
             vocab_size=self.number_mel_codes,
@@ -411,22 +411,7 @@ class UnifiedVoice(nn.Module):
             self.mel_head,
             kv_cache=kv_cache,
         )
-        if use_deepspeed and half and torch.cuda.is_available():
-            import deepspeed
-            self.ds_engine = deepspeed.init_inference(model=self.inference_model,
-                                                      mp_size=1,
-                                                      replace_with_kernel_inject=False,
-                                                      dtype=torch.float16)
-            self.inference_model = self.ds_engine.module.eval()
-        elif use_deepspeed and torch.cuda.is_available():
-            import deepspeed
-            self.ds_engine = deepspeed.init_inference(model=self.inference_model,
-                                                      mp_size=1,
-                                                      replace_with_kernel_inject=False,
-                                                      dtype=torch.float32)
-            self.inference_model = self.ds_engine.module.eval()
-        else:
-            self.inference_model = self.inference_model.eval()
+        self.inference_model = self.inference_model.eval()
 
         # self.inference_model = PrunedGPT2InferenceModel(gpt_config, self.gpt, self.mel_pos_embedding, self.mel_embedding, self.final_norm, self.mel_head)
         self.gpt.wte = self.mel_embedding

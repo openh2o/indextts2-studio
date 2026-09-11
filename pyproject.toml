@@ -68,23 +68,6 @@ dependencies = [
 webui = [
   "gradio==5.45.0",
 ]
-# To install the DeepSpeed support, use `uv sync --extra deepspeed` (or `--all-extras`).
-deepspeed = [
-  "deepspeed==0.17.1",
-]
-# To install the GPT2 acceleration engine, use `uv sync --extra accel` (or `--all-extras`).
-# NOTE: flash-attn 2.8.3.post1 also requires triton at import time on Windows.
-accel = [
-  "flash-attn==2.8.3.post1",
-  "nvidia-cuda-runtime-cu12",
-  "nvidia-cudnn-cu12",
-  "triton-windows==3.1.0.post17",
-]
-# To install torch.compile support for s2mel, use `uv sync --extra torch_compile` (or `--all-extras`).
-# On Windows this is satisfied by the triton-windows package above.
-torch_compile = [
-  "triton-windows==3.1.0.post17",
-]
 test = [
   "pytest>=7.0",
 ]
@@ -110,12 +93,7 @@ requires = ["hatchling >= 1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.uv]
-# Disable build isolation when building DeepSpeed from source.
-# NOTE: This is *necessary* so that DeepSpeed builds directly within our `.venv`,
-# and finds our CUDA-enabled version of PyTorch, which DeepSpeed *needs* during
-# its compilation to determine what GPU support to compile for itself. It also
-# saves time, since it won't waste time downloading a generic PyTorch version.
-no-build-isolation-package = ["deepspeed"]
+environments = ["sys_platform == 'win32'"]
 
 [tool.uv.sources]
 # Install PyTorch with CUDA support on Linux/Windows (CUDA doesn't exist for Mac).

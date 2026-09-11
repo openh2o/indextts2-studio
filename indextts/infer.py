@@ -27,7 +27,6 @@ from indextts.utils.front import TextNormalizer, TextTokenizer
 class IndexTTS:
     def __init__(
             self, cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=True, device=None,
-            use_cuda_kernel=None,
     ):
         """
         Args:
@@ -35,28 +34,22 @@ class IndexTTS:
             model_dir (str): path to the model directory.
             use_fp16 (bool): whether to use fp16.
             device (str): device to use (e.g., 'cuda:0', 'cpu'). If None, it will be set automatically based on the availability of CUDA or MPS.
-            use_cuda_kernel (None | bool): whether to use BigVGan custom fused activation CUDA kernel, only for CUDA device.
         """
         if device is not None:
             self.device = device
             self.use_fp16 = False if device == "cpu" else use_fp16
-            self.use_cuda_kernel = use_cuda_kernel is not None and use_cuda_kernel and device.startswith("cuda")
         elif torch.cuda.is_available():
             self.device = "cuda:0"
             self.use_fp16 = use_fp16
-            self.use_cuda_kernel = use_cuda_kernel is None or use_cuda_kernel
         elif hasattr(torch, "xpu") and torch.xpu.is_available():
             self.device = "xpu"
             self.use_fp16 = use_fp16
-            self.use_cuda_kernel = False
         elif hasattr(torch, "mps") and torch.backends.mps.is_available():
             self.device = "mps"
             self.use_fp16 = False  # Use float16 on MPS is overhead than float32
-            self.use_cuda_kernel = False
         else:
             self.device = "cpu"
             self.use_fp16 = False
-            self.use_cuda_kernel = False
             print(">> Be patient, it may take a while to run in CPU mode.")
 
         self.cfg = OmegaConf.load(cfg_path)
@@ -86,30 +79,9 @@ class IndexTTS:
         else:
             self.gpt.eval()
         print(">> GPT weights restored from:", self.gpt_path)
-        if self.use_fp16:
-            try:
-                import deepspeed
+        self.gpt.post_init_gpt2_config(kv_cache=self.use_fp16, half=self.use_fp16)
 
-                use_deepspeed = True
-            except (ImportError, OSError, CalledProcessError) as e:
-                use_deepspeed = False
-                print(f">> DeepSpeed加载失败，回退到标准推理: {e}")
-
-            self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=True)
-        else:
-            self.gpt.post_init_gpt2_config(use_deepspeed=False, kv_cache=False, half=False)
-
-        if self.use_cuda_kernel:
-            # preload the CUDA kernel for BigVGAN
-            try:
-                from indextts.BigVGAN.alias_free_activation.cuda import load
-
-                anti_alias_activation_cuda = load.load()
-                print(">> Preload custom CUDA kernel for BigVGAN", anti_alias_activation_cuda)
-            except:
-                print(">> Failed to load custom CUDA kernel for BigVGAN. Falling back to torch.")
-                self.use_cuda_kernel = False
-        self.bigvgan = Generator(self.cfg.bigvgan, use_cuda_kernel=self.use_cuda_kernel)
+        self.bigvgan = Generator(self.cfg.bigvgan)
         self.bigvgan_path = os.path.join(self.model_dir, self.cfg.bigvgan_checkpoint)
         vocoder_dict = torch.load(self.bigvgan_path, map_location="cpu")
         self.bigvgan.load_state_dict(vocoder_dict["generator"])
@@ -686,5 +658,5 @@ if __name__ == "__main__":
     prompt_wav = "examples/voice_01.wav"
     text = '欢迎大家来体验indextts2，并给予我们意见与反馈，谢谢大家。'
 
-    tts = IndexTTS(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_cuda_kernel=False)
+    tts = IndexTTS(cfg_path="checkpoints/config.yaml", model_dir="checkpoints")
     tts.infer(audio_prompt=prompt_wav, text=text, output_path="gen.wav", verbose=True)

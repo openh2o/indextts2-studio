@@ -28,12 +28,12 @@ class BASECFM(torch.nn.Module, ABC):
             self.zero_prompt_speech_token = False
 
     @torch.inference_mode()
-    def inference(self, mu, x_lens, prompt, style, f0, n_timesteps, temperature=1.0, inference_cfg_rate=0.5):
+    def inference(self, mu, x_lens, prompt, style, f0, n_timesteps, temperature=1.0, inference_cfg_rate=0.5, progress_cb=None):
         """Forward diffusion
 
         Args:
             mu (torch.Tensor): semantic info of reference audio and altered audio
-                shape: (batch_size, mel_timesteps(795+1069), 512)
+                shape: (batch_size, mel_timesteps, 512)
             x_lens (torch.Tensor): mel frames output
                 shape: (batch_size, mel_timesteps)
             prompt (torch.Tensor): reference mel
@@ -42,7 +42,9 @@ class BASECFM(torch.nn.Module, ABC):
                 shape: (batch_size, 192)
             f0: None
             n_timesteps (int): number of diffusion steps
-            temperature (float, optional): temperature for scaling noise. Defaults to 1.0.
+            temperature (float, optional): for scaling noise. Defaults to 1.0.
+            progress_cb (callable, optional): called with (step/total) each diffusion
+                step. When None, falls back to a tqdm bar on stderr (legacy behavior).
 
         Returns:
             sample: generated mel-spectrogram
@@ -52,9 +54,9 @@ class BASECFM(torch.nn.Module, ABC):
         z = torch.randn([B, self.in_channels, T], device=mu.device) * temperature
         t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device)
         # t_span = t_span + (-1) * (torch.cos(torch.pi / 2 * t_span) - 1 + t_span)
-        return self.solve_euler(z, x_lens, prompt, mu, style, f0, t_span, inference_cfg_rate)
+        return self.solve_euler(z, x_lens, prompt, mu, style, f0, t_span, inference_cfg_rate, progress_cb)
 
-    def solve_euler(self, x, x_lens, prompt, mu, style, f0, t_span, inference_cfg_rate=0.5):
+    def solve_euler(self, x, x_lens, prompt, mu, style, f0, t_span, inference_cfg_rate=0.5, progress_cb=None):
         """
         Fixed euler solver for ODEs.
         Args:
@@ -82,7 +84,13 @@ class BASECFM(torch.nn.Module, ABC):
         x[..., :prompt_len] = 0
         if self.zero_prompt_speech_token:
             mu[..., :prompt_len] = 0
-        for step in tqdm(range(1, len(t_span))):
+        # progress_cb 上报时每步都走回调（25~50 步/次，量级与 GPT 阶段每 10 token 上报相当）；
+        # 无回调时保留 tqdm 兼容旧调用方（archive/webui 等直接 stderr 显示）
+        steps = range(1, len(t_span))
+        total = len(t_span) - 1
+        for step in (tqdm(steps) if progress_cb is None else steps):
+            if progress_cb is not None:
+                progress_cb(step / total)
             dt = t_span[step] - t_span[step - 1]
             if inference_cfg_rate > 0:
                 # Stack original and CFG (null) inputs for batched processing
@@ -169,18 +177,3 @@ class CFM(BASECFM):
             self.estimator = DiT(args)
         else:
             raise NotImplementedError(f"Unknown diffusion type {args.dit_type}")
-
-    def enable_torch_compile(self):
-        """Enable torch.compile optimization for the estimator model.
-        
-        This method applies torch.compile to the estimator (DiT model) for significant
-        performance improvements during inference. It also configures distributed
-        training optimizations if applicable.
-        """
-        if torch.distributed.is_initialized():
-            torch._inductor.config.reorder_for_compute_comm_overlap = True
-        self.estimator = torch.compile(
-            self.estimator, 
-            fullgraph=True,
-            dynamic=True,
-        )
