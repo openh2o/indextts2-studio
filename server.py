@@ -6,9 +6,11 @@ boots fast and idle VRAM stays at zero.
 """
 import argparse
 import gc
+import hashlib
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -35,8 +37,8 @@ warnings.filterwarnings("ignore", category=UserWarning)
 sys.path.append(current_dir)
 sys.path.append(os.path.join(current_dir, "indextts"))
 
-from fastapi import FastAPI, Body, File, Form, UploadFile, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import APIRouter, Body, FastAPI, File, Form, Response, UploadFile, HTTPException
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from omegaconf import OmegaConf
 from urllib.parse import quote
 from indextts.utils.presets import (
@@ -46,6 +48,9 @@ from indextts.utils.presets import (
     delete_preset,
     get_presets_dir,
     safe_preset_name,
+    preset_exists,
+    rename_preset,
+    duplicate_preset,
 )
 # Pure helpers (mojibake repair / filename rules) live in their own module so
 # they can be unit-tested without importing the app or torch.
@@ -56,6 +61,9 @@ from indextts.utils.server_helpers import (
     output_name as _output_name,
     prompt_file as _prompt_file_impl,
     clean_legacy_prompts as _clean_legacy_prompts_impl,
+    looks_like_audio as _looks_like_audio,
+    cap_prompt_files as _cap_prompt_files,
+    AUDIO_MAX_BYTES,
 )
 parser = argparse.ArgumentParser(
     description="IndexTTS2 FastAPI server",
@@ -81,7 +89,16 @@ parser.add_argument("--cudnn_benchmark", action="store_true", default=False,
                          "and a whole run 38s -> 141s. Leave off unless the input shape is fixed.")
 cmd_args = parser.parse_args()
 
-app = FastAPI(title="IndexTTS2")
+app = FastAPI(
+    title="IndexTTS2",
+    version="1.0",
+    description="IndexTTS2 本地服务。JSON 接口统一挂在 /api/v1 前缀下，"
+                "交互式文档见 /docs；静态页面与资源留在根路径（/、/assets）。",
+)
+# API 版本化：全部 JSON 路由定义在 api 路由器上（文件末尾统一挂到 app），
+# 前缀 /api/v1；静态资源不走版本前缀。
+API_V1 = "/api/v1"
+api = APIRouter(prefix=API_V1)
 
 
 class LazyTTS:
@@ -303,6 +320,28 @@ def _clean_legacy_prompts():
 _clean_legacy_prompts()
 
 
+# 输入硬上限（超限直接 4xx 拒绝，避免超长文本把 GPU 任务拖到分钟级才静默截断）
+MAX_TEXT_CHARS = 2000     # /tts 合成文本；长文本应分段生成
+MAX_EMO_TEXT_CHARS = 500  # 情感描述文本（送 Qwen 做情感分析）
+
+
+def _validate_audio_upload(data: bytes, label: str) -> None:
+    """上传校验：大小上限 + 常见音频容器的魔数嗅探，在落盘前给出可读的 4xx。
+
+    完整解码校验仍由推理侧 librosa 承担（失败经 SSE 报错）；这里只拦截
+    明显不是音频的文件（改名的文本/图片等），不做重解码。
+    """
+    if not data:
+        raise HTTPException(400, f"{label}是空文件")
+    if len(data) > AUDIO_MAX_BYTES:
+        raise HTTPException(
+            413,
+            f"{label}过大（{len(data) / 1048576:.0f} MB，上限 {AUDIO_MAX_BYTES // 1048576} MB）",
+        )
+    if not _looks_like_audio(data):
+        raise HTTPException(400, f"{label}不是可识别的音频文件（支持 wav/mp3/flac/ogg/m4a）")
+
+
 # outputs/ 保留策略：历史自动清理只覆盖"本次运行"生成过的文件，服务器重启后
 # 旧文件全成孤儿，目录会无限膨胀（实测曾积到 489 个 / 207MB）。启动时按
 # mtime 清掉超过保留天数的孤儿 wav；预设目录(outputs/presets)一并保护。
@@ -333,7 +372,7 @@ def _clean_stale_outputs(retention_days: int = OUTPUTS_RETENTION_DAYS) -> int:
     return removed
 
 
-@app.get("/health")
+@api.get("/health")
 def health():
     return {"status": "ok", "model_loaded": tts.loaded}
 
@@ -378,7 +417,7 @@ def _gpu_readings():
     return _smi_cache["util"], _smi_cache["used"]
 
 
-@app.get("/metrics")
+@api.get("/metrics")
 def metrics():
     try:
         import psutil
@@ -405,9 +444,34 @@ def metrics():
 # ---- web UI: static files live in web/ and are served from the site root ----
 _WEB_DIR = os.path.join(current_dir, "web")
 
+# 静态资源内容指纹：启动时读 web/ 下各文件 md5 前 8 位作版本号，注入 index.html
+# 的 ?v= 占位符。文件改动 → 指纹变 → URL 变，配合长缓存头让浏览器自动拉新，
+# 不再手工维护 ?v=20260912 这类日期版本号。
+_ASSET_FINGERPRINT = {}
+
+
+def _build_asset_fingerprints():
+    for fname in os.listdir(_WEB_DIR):
+        fpath = os.path.join(_WEB_DIR, fname)
+        if not os.path.isfile(fpath) or fname == "index.html":
+            continue
+        try:
+            with open(fpath, "rb") as f:
+                _ASSET_FINGERPRINT[fname] = hashlib.md5(f.read()).hexdigest()[:8]
+        except OSError:
+            continue
+
+
+_build_asset_fingerprints()
+
 
 def _asset_response(name: str):
-    """Serve one file from web/ by basename (no path traversal)."""
+    """Serve one file from web/ by basename (no path traversal).
+
+    静态资源带一年 immutable 缓存：URL 中的 ?v= 内容指纹变了浏览器才会拉新，
+    所以可以放心让浏览器与磁盘缓存长期复用（app.js 52KB + style.css 32KB
+    每次刷新都重新下载纯属浪费）。
+    """
     fname = os.path.basename(name)
     path = os.path.join(_WEB_DIR, fname)
     if not os.path.isfile(path):
@@ -420,7 +484,10 @@ def _asset_response(name: str):
         ".ico": "image/x-icon",
         ".woff2": "font/woff2",
     }.get(Path(fname).suffix.lower(), "application/octet-stream")
-    return FileResponse(path, media_type=media)
+    return FileResponse(
+        path, media_type=media,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 @app.get("/", response_class=FileResponse)
@@ -428,7 +495,14 @@ def index():
     path = os.path.join(_WEB_DIR, "index.html")
     if not os.path.exists(path):
         raise HTTPException(404, "web/index.html not found")
-    return FileResponse(path, media_type="text/html", headers={"Cache-Control": "no-cache"})
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            html = f.read()
+    except OSError as e:
+        raise HTTPException(500, f"Failed to read index.html: {e}")
+    # 把 ?v=xxx 占位符替换为内容指纹；favicon 之类没指纹的保持原样
+    html = re.sub(r'\?v=\{([a-z0-9_.]+)\}', lambda m: f"?v={_ASSET_FINGERPRINT.get(m.group(1), '0')}", html)
+    return Response(content=html, media_type="text/html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/assets/{name}")
@@ -436,7 +510,19 @@ def asset(name: str):
     return _asset_response(name)
 
 
-@app.get("/model")
+@api.get("/status")
+def status():
+    """合并端点：模型状态 + 系统仪表一次往返。
+
+    前端 Header 每 2s 轮询一次这里即可（此前 /model 与 /metrics 各发一次，
+    多标签页叠加时请求数翻倍）。
+    """
+    data = {"ok": True, **tts.state()}
+    data.update(metrics())
+    return data
+
+
+@api.get("/model")
 def model_state():
     return {"ok": True, **tts.state()}
 
@@ -449,7 +535,7 @@ _MODEL_CONFIG_KEYS = frozenset({
 })
 
 
-@app.post("/model/config")
+@api.post("/model/config")
 def model_config(req: dict = Body(...)):
     unknown = [k for k in req if k not in _MODEL_CONFIG_KEYS]
     if unknown:
@@ -463,7 +549,7 @@ def model_config(req: dict = Body(...)):
     return {"ok": True, **tts.state()}
 
 
-@app.post("/model/load")
+@api.post("/model/load")
 def model_load():
     with _INFER_LOCK:
         try:
@@ -474,7 +560,7 @@ def model_load():
     return {**result, **tts.state()}
 
 
-@app.post("/model/unload")
+@api.post("/model/unload")
 def model_unload():
     with _INFER_LOCK:
         tts.unload()
@@ -488,7 +574,7 @@ def model_unload():
     return {"ok": True, **tts.state()}
 
 
-@app.post("/model/restart")
+@api.post("/model/restart")
 def model_restart(req: dict | None = Body(None)):
     """Apply the page config (when supplied), then rebuild the model."""
     if req:
@@ -568,7 +654,7 @@ def _register_job(client_id):
     return job_id, ahead
 
 
-@app.get("/jobs/current")
+@api.get("/jobs/current")
 def jobs_current(client_id: str = ""):
     """Return the newest job belonging to one browser tab."""
     if not client_id:
@@ -584,7 +670,7 @@ def jobs_current(client_id: str = ""):
     return {"ok": True, "job": data}
 
 
-@app.get("/jobs/{job_id}")
+@api.get("/jobs/{job_id}")
 def jobs_detail(job_id: str):
     with _JOBS_LOCK:
         _prune_finished_jobs()
@@ -595,7 +681,7 @@ def jobs_detail(job_id: str):
     return {"ok": True, "job": data}
 
 
-@app.post("/tts/{job_id}/cancel")
+@api.post("/tts/{job_id}/cancel")
 def tts_cancel(job_id: str):
     """Cancel an inference job.
 
@@ -614,7 +700,7 @@ def tts_cancel(job_id: str):
     return {"ok": True, "state": state}
 
 
-@app.post("/tts/{job_id}/stop")
+@api.post("/tts/{job_id}/stop")
 def tts_stop(job_id: str):
     """Stop a queued or running job.
 
@@ -635,7 +721,7 @@ def tts_stop(job_id: str):
             state = "stop_requested"
     return {"ok": True, "state": state}
 
-@app.post("/tts")
+@api.post("/tts")
 def do_tts(
     text: str = Form(...),
     client_id: str = Form(""),
@@ -669,15 +755,30 @@ def do_tts(
     # 文本可能在到达 HTTP 之前就已乱码（见 _fix_mojibake），先还原再用于合成与命名
     text = _fix_mojibake(text)
     emo_text = _fix_mojibake(emo_text)
+    if len(text) > MAX_TEXT_CHARS:
+        raise HTTPException(
+            413,
+            f"文本过长（{len(text)} 字，上限 {MAX_TEXT_CHARS} 字）；请分段生成",
+        )
+    if emo_text and len(emo_text) > MAX_EMO_TEXT_CHARS:
+        raise HTTPException(
+            413,
+            f"情感描述文本过长（{len(emo_text)} 字，上限 {MAX_EMO_TEXT_CHARS} 字）",
+        )
     try:
         spk_data = spk_audio.file.read()
     except Exception as e:
         raise HTTPException(400, f"Failed to read speaker audio: {e}")
+    _validate_audio_upload(spk_data, "音色参考音频")
     spk_path = _prompt_file("spk", spk_data)
     try:
-        if not os.path.exists(spk_path):
+        if os.path.exists(spk_path):
+            # LRU touch: cap_prompt_files 按旧 mtime 驱逐，常用音色常驻
+            os.utime(spk_path, None)
+        else:
             with open(spk_path, "wb") as f:
                 f.write(spk_data)
+            _cap_prompt_files("prompts")
     except Exception as e:
         raise HTTPException(400, f"Failed to save speaker audio: {e}")
 
@@ -687,11 +788,15 @@ def do_tts(
             emo_data = emo_audio.file.read()
         except Exception as e:
             raise HTTPException(400, f"Failed to read emo audio: {e}")
+        _validate_audio_upload(emo_data, "情感参考音频")
         emo_ref_path = _prompt_file("emo", emo_data)
         try:
-            if not os.path.exists(emo_ref_path):
+            if os.path.exists(emo_ref_path):
+                os.utime(emo_ref_path, None)
+            else:
                 with open(emo_ref_path, "wb") as f:
                     f.write(emo_data)
+                _cap_prompt_files("prompts")
         except Exception as e:
             raise HTTPException(400, f"Failed to save emo audio: {e}")
 
@@ -744,6 +849,7 @@ def do_tts(
                     "file": ev.get("file"),
                     "elapsed": ev.get("elapsed"),
                     "history_id": ev.get("history_id"),
+                    "mel_capped": ev.get("mel_capped", False),
                 }
             elif ev["type"] == "error":
                 job["state"] = "error"
@@ -839,12 +945,15 @@ def do_tts(
                 elapsed = round(time.time() - t0, 2)
                 wav_name = Path(out_path).name
                 entry = _history_add(wav_name, text, elapsed, mode)
+                # 触到 max_mel_tokens 上限的生成是静默截断，前端必须提示
+                mel_capped = bool(getattr(model, "mel_tokens_capped", False))
                 record_event({
                     "type": "done",
                     "wav": f"/audio/{wav_name}",
                     "file": wav_name,
                     "elapsed": elapsed,
                     "history_id": entry["id"],
+                    "mel_capped": mel_capped,
                 })
         except _InferenceStop:
             record_event({"type": "stopping", "detail": "正在停止生成并重新加载模型…"})
@@ -888,7 +997,7 @@ def do_tts(
     )
 
 
-@app.get("/audio/{name}")
+@api.get("/audio/{name}")
 def audio(name: str):
     path = os.path.join("outputs", os.path.basename(name))
     if not os.path.exists(path):
@@ -940,7 +1049,7 @@ def _history_add(file_name: str, text: str, elapsed: float, emo_mode: int) -> di
     return entry
 
 
-@app.get("/history")
+@api.get("/history")
 def history_list():
     return JSONResponse({
         "items": _history,
@@ -950,14 +1059,14 @@ def history_list():
     })
 
 
-@app.post("/history/config")
+@api.post("/history/config")
 def history_config(auto_clean: bool = Form(...)):
     global _history_auto_clean
     _history_auto_clean = bool(auto_clean)
     return JSONResponse({"auto_clean": _history_auto_clean, "count": len(_history)})
 
 
-@app.delete("/history")
+@api.delete("/history")
 def history_clear():
     """Clear the list; with auto-clean on, the audio files go too."""
     removed = len(_history)
@@ -971,7 +1080,7 @@ def history_clear():
     return JSONResponse({"ok": True, "removed": removed, "count": 0})
 
 
-@app.delete("/history/{item_id}")
+@api.delete("/history/{item_id}")
 def history_remove(item_id: str):
     global _history
     hit = None
@@ -992,12 +1101,12 @@ def history_remove(item_id: str):
     return JSONResponse({"ok": True, "count": len(_history)})
 
 
-@app.get("/presets")
+@api.get("/presets")
 def presets_list():
     return JSONResponse({"presets": list_presets()})
 
 
-@app.post("/presets")
+@api.post("/presets")
 def presets_create(
     name: str = Form(...),
     emo_control_method: int = Form(0),
@@ -1023,9 +1132,15 @@ def presets_create(
     max_text_tokens_per_segment: int = Form(120),
     prompt_audio: UploadFile | None = File(None),
     emo_audio: UploadFile | None = File(None),
+    overwrite: bool = Form(False),
 ):
     name = _fix_mojibake(name)
     emo_text = _fix_mojibake(emo_text)
+    # 同名保护：未显式声明 overwrite 时返回 409，由前端弹确认，不再静默覆盖
+    if preset_exists(name):
+        if not overwrite:
+            raise HTTPException(409, f"预设「{name}」已存在")
+        delete_preset(name)
     data = {
         "emo_control_method": int(emo_control_method),
         "emo_weight": float(emo_weight),
@@ -1049,13 +1164,17 @@ def presets_create(
     emo_tmp = None
     try:
         if prompt_audio is not None:
+            prompt_data = prompt_audio.file.read()
+            _validate_audio_upload(prompt_data, "预设音色音频")
             prompt_tmp = os.path.join("prompts", f"preset_prompt_{uuid.uuid4().hex}.wav")
             with open(prompt_tmp, "wb") as f:
-                f.write(prompt_audio.file.read())
+                f.write(prompt_data)
         if emo_audio is not None:
+            emo_data = emo_audio.file.read()
+            _validate_audio_upload(emo_data, "预设情感音频")
             emo_tmp = os.path.join("prompts", f"preset_emo_{uuid.uuid4().hex}.wav")
             with open(emo_tmp, "wb") as f:
-                f.write(emo_audio.file.read())
+                f.write(emo_data)
         save_preset(name, data, prompt_audio=prompt_tmp, emo_audio=emo_tmp)
     except Exception as e:
         raise HTTPException(500, f"Failed to save preset: {e}")
@@ -1069,7 +1188,7 @@ def presets_create(
     return JSONResponse({"presets": list_presets()})
 
 
-@app.get("/presets/{name}")
+@api.get("/presets/{name}")
 def presets_detail(name: str):
     data = load_preset(name)
     if data is None:
@@ -1081,7 +1200,7 @@ def presets_detail(name: str):
     return JSONResponse(data)
 
 
-@app.get("/presets/{name}/audio/{kind}")
+@api.get("/presets/{name}/audio/{kind}")
 def presets_audio(name: str, kind: str):
     rel = {"prompt": "prompt.wav", "emo_ref": "emo_ref.wav"}.get(kind)
     if rel is None:
@@ -1092,12 +1211,38 @@ def presets_audio(name: str, kind: str):
     return FileResponse(path, media_type="audio/wav")
 
 
-@app.delete("/presets/{name}")
+@api.delete("/presets/{name}")
 def presets_remove(name: str):
     ok = delete_preset(name)
     if not ok:
         raise HTTPException(404, "Preset not found")
     return JSONResponse({"presets": list_presets()})
+
+
+@api.post("/presets/{name}/rename")
+def presets_rename(name: str, req: dict = Body(...)):
+    """改名：保留目录内音频与参数，只换目录名。"""
+    new_name = req.get("name")
+    if not new_name or not str(new_name).strip():
+        raise HTTPException(400, "新名称不能为空")
+    new_name = _fix_mojibake(str(new_name))
+    try:
+        final = rename_preset(name, new_name)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return JSONResponse({"ok": True, "name": final, "presets": list_presets()})
+
+
+@api.post("/presets/{name}/duplicate")
+def presets_duplicate(name: str, req: dict | None = Body(None)):
+    """复制预设；未指定新名时默认「原名_copy」。"""
+    new_name = ((req or {}).get("name") or "").strip() or f"{name}_copy"
+    new_name = _fix_mojibake(str(new_name))
+    try:
+        final = duplicate_preset(name, new_name)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return JSONResponse({"ok": True, "name": final, "presets": list_presets()})
 
 
 def _load_examples(include_experimental=False):
@@ -1124,12 +1269,12 @@ def _load_examples(include_experimental=False):
     return examples
 
 
-@app.get("/examples")
+@api.get("/examples")
 def examples_list(include_experimental: bool = False):
     return JSONResponse({"examples": _load_examples(include_experimental=include_experimental)})
 
 
-@app.get("/examples/{name}")
+@api.get("/examples/{name}")
 def examples_file(name: str):
     path = os.path.join(current_dir, "examples", os.path.basename(name))
     if not os.path.exists(path):
@@ -1137,11 +1282,16 @@ def examples_file(name: str):
     return FileResponse(path, media_type="audio/wav")
 
 
-@app.post("/segments")
+@api.post("/segments")
 def segments_preview(text: str = Form(""), max_text_tokens_per_segment: int = Form(120)):
     text = text.strip()
     if not text:
         return JSONResponse({"segments": []})
+    if len(text) > MAX_TEXT_CHARS:
+        raise HTTPException(
+            413,
+            f"文本过长（{len(text)} 字，上限 {MAX_TEXT_CHARS} 字）；请分段生成",
+        )
     tts._ensure_light()
     tokens = tts.tokenizer.tokenize(text)
     segs = tts.tokenizer.split_segments(tokens, max_text_tokens_per_segment=int(max_text_tokens_per_segment))
@@ -1158,12 +1308,12 @@ def _glossary_dict():
     return {k: v for k, v in (tts.normalizer.term_glossary or {}).items()}
 
 
-@app.get("/glossary")
+@api.get("/glossary")
 def glossary_list():
     return JSONResponse({"glossary": _glossary_dict()})
 
 
-@app.post("/glossary")
+@api.post("/glossary")
 def glossary_add(
     term: str = Form(...),
     reading_zh: str = Form(""),
@@ -1192,7 +1342,7 @@ def glossary_add(
     return JSONResponse({"glossary": _glossary_dict()})
 
 
-@app.delete("/glossary")
+@api.delete("/glossary")
 def glossary_clear():
     tts.normalizer.term_glossary.clear()
     try:
@@ -1200,6 +1350,40 @@ def glossary_clear():
     except Exception as e:
         raise HTTPException(500, f"保存词汇表出错: {e}")
     return JSONResponse({"glossary": _glossary_dict()})
+
+
+# ---- API 挂载 -----------------------------------------------------------------
+# 版本化：JSON 接口正式路径为 /api/v1/*，前端 fetch 前缀在 app.js 顶部集中常量化。
+# 旧根路径地址以 307 重定向保活，兼容已存在的书签 / 第三方脚本。
+app.include_router(api)
+
+_legacy_json_routes = (
+    ("GET", "health"), ("GET", "metrics"), ("GET", "model"), ("GET", "status"),
+    ("POST", "model/config"), ("POST", "model/load"), ("POST", "model/unload"),
+    ("POST", "model/restart"), ("POST", "tts"), ("POST", "tts/{job_id}/cancel"),
+    ("POST", "tts/{job_id}/stop"), ("GET", "jobs/current"), ("GET", "jobs/{job_id}"),
+    ("GET", "audio/{name}"), ("GET", "history"), ("POST", "history/config"),
+    ("DELETE", "history"), ("DELETE", "history/{item_id}"),
+    ("GET", "presets"), ("POST", "presets"), ("GET", "presets/{name}"),
+    ("GET", "presets/{name}/audio/{kind}"), ("DELETE", "presets/{name}"),
+    ("POST", "presets/{name}/rename"), ("POST", "presets/{name}/duplicate"),
+    ("GET", "examples"), ("GET", "examples/{name}"), ("POST", "segments"),
+    ("GET", "glossary"), ("POST", "glossary"), ("DELETE", "glossary"),
+)
+
+
+def _register_legacy_redirects():
+    """307-redirect legacy root-level JSON paths to their /api/v1 equivalent."""
+    for method, path in _legacy_json_routes:
+        def endpoint(p=path):
+            return RedirectResponse(url=f"{API_V1}/{p}", status_code=307)
+        app.add_api_route(
+            f"/{path}", endpoint, methods=[method],
+            include_in_schema=False, name=f"legacy_{method.lower()}_{path}",
+        )
+
+
+_register_legacy_redirects()
 
 
 if __name__ == "__main__":

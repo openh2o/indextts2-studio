@@ -3,6 +3,27 @@
 
 const $ = (id) => document.getElementById(id);
 
+/* ---------------- API base ----------------
+   所有 JSON 接口集中在 /api/v1 版本前缀下（旧根路径后端 307 兼容重定向）。
+   音频/静态资源（/audio、/assets）不带前缀。 */
+const API = "/api/v1";
+
+/* 合成文本字数上限：与后端 MAX_TEXT_CHARS 同口径（textarea maxlength 已同步硬限） */
+const MAX_TEXT_CHARS = 2000;
+
+/* fetch 封装：自动拼 API 前缀 + 统一错误信息提取 */
+async function apiFetch(path, opts) {
+  const r = await fetch(API + path, opts);
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch (e) { /* non-JSON body */ }
+    const err = new Error(detail || `请求失败（${r.status}）`);
+    err.status = r.status;
+    throw err;
+  }
+  return r;
+}
+
 /* ---------------- themed modal (replaces native confirm/prompt) ----------------
    uiConfirm({title, body, okText, danger}) -> Promise<boolean>
    uiPrompt ({title, body, placeholder, value})  -> Promise<string|null>
@@ -248,7 +269,7 @@ let jobReconnectTimer = null;
 
 async function restoreJob() {
   try {
-    const r = await fetch(`/jobs/current?client_id=${encodeURIComponent(CLIENT_ID)}`);
+    const r = await fetch(`${API}/jobs/current?client_id=${encodeURIComponent(CLIENT_ID)}`);
     const j = await r.json().catch(() => ({}));
     const job = j.job;
     if (!job) return;
@@ -257,7 +278,7 @@ async function restoreJob() {
       clearInterval(jobReconnectTimer);
       jobReconnectTimer = setInterval(async () => {
         try {
-          const r2 = await fetch(`/jobs/${encodeURIComponent(curJobId)}`);
+          const r2 = await fetch(`${API}/jobs/${encodeURIComponent(curJobId)}`);
           if (!r2.ok) throw new Error("任务状态不可用");
           const j2 = await r2.json();
           const s = j2.job;
@@ -269,7 +290,7 @@ async function restoreJob() {
               histCurId = s.result.history_id || "";
               // 恢复路径与 SSE 路径对齐:先释放按钮/计时器/波形动画,再展示结果
               stopUi();
-              await loadResult(s.result.wav, s.result.elapsed, s.result.file);
+              await loadResult(s.result.wav, s.result.elapsed, s.result.file, { melCapped: s.result.mel_capped });
               await refreshHistory();
             } else if (s.state === "cancelled") {
               showError("已取消（排队中的任务未开始生成）");
@@ -290,7 +311,7 @@ async function restoreJob() {
       histCurId = job.result.history_id || "";
       // 与 SSE done 路径一致:先释放按钮/计时器,再展示已恢复的结果
       stopUi();
-      await loadResult(job.result.wav, job.result.elapsed, job.result.file);
+      await loadResult(job.result.wav, job.result.elapsed, job.result.file, { melCapped: job.result.mel_capped });
       await refreshHistory();
     } else if (job.state === "error") {
       showError(job.error || "生成失败");
@@ -372,20 +393,21 @@ function waveLoop(t) {
   if (genAnim.on && !document.hidden) { drawHeaderWave(t); waveRAF = requestAnimationFrame(waveLoop); }
   else { waveRAF = 0; if (!document.hidden) drawHeaderWave(0); }
 }
-/* 后台标签页暂停：metrics 轮询会触发 nvidia-smi 子进程，闲置时不空转。
+/* 后台标签页暂停：合并轮询会触发 nvidia-smi 子进程，闲置时不空转。
    生成进行中则不停 —— SSE 是推送流不受影响，但回前台要立即刷新一次。 */
 let metricsTimer = null;
-function setMetricsPolling(on) {
+function setMetricsPolling(pollFn) {
+  const on = !!pollFn;
   if (on && metricsTimer == null) {
-    metricsTimer = setInterval(pollMetrics, 2000);
-    pollMetrics();
+    metricsTimer = setInterval(pollFn, 2000);
+    pollFn();
   } else if (!on && metricsTimer != null) {
     clearInterval(metricsTimer);
     metricsTimer = null;
   }
 }
 document.addEventListener("visibilitychange", () => {
-  setMetricsPolling(!document.hidden);
+  setMetricsPolling(document.hidden ? null : pollStatus);
 });
 
 /* ---------------- system gauges (device / cpu / mem / gpu / vram) ---------------- */
@@ -398,47 +420,48 @@ function setMeter(id, pct, label) {
   if (bar) bar.style.width = `${Math.min(pct ?? 0, 100)}%`;
   el.classList.toggle("hot", (pct ?? 0) > 85);
 }
-async function pollMetrics() {
-  try {
-    const m = await (await fetch("/metrics")).json();
-    $("devText").textContent = m.gpu_name
-      ? m.gpu_name.replace(/^NVIDIA /, "")
-      : "CPU";
-    if (m.cpu_percent !== undefined) setMeter("mCpu", m.cpu_percent, `${Math.round(m.cpu_percent)}%`);
-    if (m.mem_total_gb) setMeter("mMem", (m.mem_used_gb / m.mem_total_gb) * 100, `${m.mem_used_gb.toFixed(1)}/${m.mem_total_gb.toFixed(1)}G`);
-    const hasGpu = m.gpu_percent !== undefined;
-    $("mGpu").hidden = !hasGpu;
-    $("mVram").hidden = !hasGpu;
-    if (hasGpu) {
-      setMeter("mGpu", m.gpu_percent, `${m.gpu_percent}%`);
-      setMeter("mVram", (m.vram_used_mb / (m.vram_total_mb || 8192)) * 100, `${(m.vram_used_mb / 1024).toFixed(1)}/${((m.vram_total_mb || 0) / 1024).toFixed(1)}G`);
-    }
-  } catch (e) { /* gauges are best-effort */ }
-}
-
-/* ---------------- model status polling ---------------- */
+/* ---------------- model status + system gauges: merged polling ---------------- */
+/* 轮询合并：原先 /model 与 /metrics 各自每 2s 一次（多标签页请求数翻倍），
+   现在一个 /status 往返同时驱动模型徽标与四块仪表。document.hidden 时暂停。 */
 let modelReady = false;
+function renderModelPill(s) {
+  modelReady = !!s.loaded;
+  const phase = s.phase || (s.loaded ? "ready" : "unloaded");
+  $("modelPill").dataset.s = phase === "ready" ? "ready" : phase === "unloaded" ? "unloaded" : "loading";
+  $("modelPillText").textContent = {
+    ready: "模型已加载",
+    loading: "模型加载中…",
+    reloading: "模型重载中…",
+    unloading: "模型卸载中…",
+    error: "模型状态异常",
+    unloaded: "模型未加载",
+  }[phase] || "模型未加载";
+}
+function renderMetrics(m) {
+  $("devText").textContent = m.gpu_name
+    ? m.gpu_name.replace(/^NVIDIA /, "")
+    : "CPU";
+  if (m.cpu_percent !== undefined) setMeter("mCpu", m.cpu_percent, `${Math.round(m.cpu_percent)}%`);
+  if (m.mem_total_gb) setMeter("mMem", (m.mem_used_gb / m.mem_total_gb) * 100, `${m.mem_used_gb.toFixed(1)}/${m.mem_total_gb.toFixed(1)}G`);
+  const hasGpu = m.gpu_percent !== undefined;
+  $("mGpu").hidden = !hasGpu;
+  $("mVram").hidden = !hasGpu;
+  if (hasGpu) {
+    setMeter("mGpu", m.gpu_percent, `${m.gpu_percent}%`);
+    setMeter("mVram", (m.vram_used_mb / (m.vram_total_mb || 8192)) * 100, `${(m.vram_used_mb / 1024).toFixed(1)}/${((m.vram_total_mb || 0) / 1024).toFixed(1)}G`);
+  }
+}
 async function pollStatus() {
   try {
-    const s = await (await fetch("/model")).json();
-    modelReady = !!s.loaded;
-    const phase = s.phase || (s.loaded ? "ready" : "unloaded");
-    $("modelPill").dataset.s = phase === "ready" ? "ready" : phase === "unloaded" ? "unloaded" : "loading";
-    $("modelPillText").textContent = {
-      ready: "模型已加载",
-      loading: "模型加载中…",
-      reloading: "模型重载中…",
-      unloading: "模型卸载中…",
-      error: "模型状态异常",
-      unloaded: "模型未加载",
-    }[phase] || "模型未加载";
+    const s = await (await fetch(`${API}/status`)).json();
+    renderModelPill(s);
+    renderMetrics(s);
   } catch (e) {
     $("modelPill").dataset.s = "unloaded";
     $("modelPillText").textContent = "服务连接中断…";
   }
 }
-setInterval(pollStatus, 2000);
-setMetricsPolling(true);
+setMetricsPolling(pollStatus);
 
 /* ---------------- speaker reference audio ---------------- */
 const spkDrop = $("spkDrop"), spkFile = $("spkFile");
@@ -696,7 +719,7 @@ async function updateSegments() {
   fd.append("text", text);
   fd.append("max_text_tokens_per_segment", $("segTokens").value);
   try {
-    const r = await fetch("/segments", { method: "POST", body: fd });
+    const r = await fetch(`${API}/segments`, { method: "POST", body: fd });
     const j = await r.json();
     const segs = j.segments || [];
     if (!segs.length) { segList.replaceChildren(); return; }
@@ -734,7 +757,12 @@ function scheduleSegments() {
   segTimer = setTimeout(updateSegments, 300);
 }
 $("text").addEventListener("input", () => {
-  $("charCount").textContent = `${$("text").value.trim().length} 字`;
+  const len = $("text").value.trim().length;
+  const cc = $("charCount");
+  cc.textContent = `${len} 字`;
+  // 接近/到达上限时计数标红（textarea 已加 maxlength=2000 硬限；此处提示分段生成）
+  cc.classList.toggle("warn", len >= MAX_TEXT_CHARS);
+  if (len >= MAX_TEXT_CHARS) cc.textContent += "（已达上限，请分段生成）";
   scheduleSegments();
   scheduleDraftSave();
 });
@@ -786,6 +814,7 @@ function showLoading(stage, cancellable = true) {
 
 const PROG_DESC = {
   "starting inference...": "启动推理",
+  "emotion analysis...": "情感分析（Qwen）…",
   "text processing...": "文本分词与分段",
   "saving audio...": "解码合成音频",
 };
@@ -902,7 +931,7 @@ cancelBtn.addEventListener("click", async () => {
         return;
       }
     }
-    const r = await fetch(`/tts/${jobId}/stop`, { method: "POST" });
+    const r = await fetch(`${API}/tts/${jobId}/stop`, { method: "POST" });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.detail || "停止失败");
     if (j.state === "cancelled") {
@@ -921,6 +950,21 @@ cancelBtn.addEventListener("click", async () => {
   }
 });
 
+/* 前端文件校验：与后端 413/400 同口径，能在请求发出前就拦住（后端仍是权威校验） */
+const AUDIO_MAX_MB = 20;
+const AUDIO_TYPES = ["audio/", ".wav", ".mp3", ".flac", ".ogg", ".m4a"];
+function validateAudioFile(file, label) {
+  if (!file) return "";
+  if (file.size > AUDIO_MAX_MB * 1048576) {
+    return `${label}过大（${(file.size / 1048576).toFixed(0)} MB，上限 ${AUDIO_MAX_MB} MB）`;
+  }
+  const n = file.name.toLowerCase();
+  if (!AUDIO_TYPES.some((t) => file.type.startsWith(t) || n.endsWith(t))) {
+    return `${label}不是可识别的音频文件（支持 wav/mp3/flac/ogg/m4a）`;
+  }
+  return "";
+}
+
 genBtn.addEventListener("click", async () => {
   const text = $("text").value.trim();
   if (!text) { showError("请先输入要合成的文本"); return; }
@@ -929,6 +973,12 @@ genBtn.addEventListener("click", async () => {
   const mode = $("emoMode").value;
   if (mode == "1" && !$("emoFile").files[0]) { showError("情感参考音频模式下请先选择情感音频"); return; }
   if (mode == "3" && !$("emoText").value.trim()) { showError("请输入情感描述文本"); return; }
+  const spkErr = validateAudioFile(spkSelected, "音色参考音频");
+  if (spkErr) { showError(spkErr); return; }
+  if (mode == "1") {
+    const emoErr = validateAudioFile($("emoFile").files[0], "情感参考音频");
+    if (emoErr) { showError(emoErr); return; }
+  }
 
   genBtn.disabled = true;
   genStart = performance.now();
@@ -969,7 +1019,7 @@ genBtn.addEventListener("click", async () => {
   fd.append("file_naming", "title_time");
 
   try {
-    const r = await fetch("/tts", { method: "POST", body: fd, signal: curAbort.signal });
+    const r = await fetch(`${API}/tts`, { method: "POST", body: fd, signal: curAbort.signal });
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
       throw new Error(j.detail || `请求失败（${r.status}）`);
@@ -1014,6 +1064,8 @@ genBtn.addEventListener("click", async () => {
           if (loadingModel) { loadingModel = false; $("pbarFill").style.width = "0%"; }
           markStep(0, "done");
           const pStage = String(ev.desc || "").split("|")[1] || "";
+          // qwen：情感文本模式的 Qwen 情感分析阶段（可能含首次加载模型的额外耗时）
+          if (pStage === "qwen") markStep(1, "running");
           if (pStage === "ref" || (ev.value || 0) < 0.1) markStep(1, "running");
           if (pStage !== "ref" && (ev.value || 0) >= 0.1) markStep(1, "done");
           if (pStage === "gpt") markStep(2, "running");
@@ -1034,7 +1086,7 @@ genBtn.addEventListener("click", async () => {
           loadingBox.hidden = true;
           stopUi();
           histCurId = ev.history_id || "";
-          await loadResult(ev.wav, ev.elapsed, ev.file);
+          await loadResult(ev.wav, ev.elapsed, ev.file, { melCapped: ev.mel_capped });
           await refreshHistory();
           pollStatus();
         } else if (ev.type === "error") {
@@ -1064,7 +1116,9 @@ const PAUSE2 = '<path d="M6 5h4v14H6zM14 5h4v14h-4z"/>';
 let curUrl = null;
 let curServerFile = "";       // 服务端实际保存的文件名（下载时与它保持一致）
 
-async function loadResult(url, elapsed, serverFile) {
+async function loadResult(url, elapsed, serverFile, opts) {
+  const { melCapped = false } = opts || {};
+  $("melCapNote").hidden = !melCapped;
   curUrl = url;
   // 下载名与服务端 outputs/ 里的实际文件一致；文本改动不再影响已生成的结果名
   curServerFile = serverFile || (url || "").split("/").pop() || "";
@@ -1322,7 +1376,7 @@ libTabs.forEach((b) => b.addEventListener("click", () => switchLib(b.dataset.lib
 
 async function refreshPresets() {
   try {
-    const r = await (await fetch("/presets")).json();
+    const r = await (await fetch(`${API}/presets`)).json();
     presetNamesCache = r.presets || [];
   } catch (err) { /* keep old list */ }
 }
@@ -1331,7 +1385,7 @@ async function refreshPresets() {
 const presetDetailCache = new Map();
 function presetDetail(name, force = false) {
   if (!force && presetDetailCache.has(name)) return Promise.resolve(presetDetailCache.get(name));
-  const p = fetch("/presets/" + encodeURIComponent(name))
+  const p = fetch(`${API}/presets/` + encodeURIComponent(name))
     .then((r) => (r.ok ? r.json() : null))
     .then((d) => d)
     .catch(() => null);
@@ -1357,7 +1411,12 @@ function renderLib() {
     for (const name of names) {
       const row = document.createElement("div");
       row.className = "hist-item" + (name === curPresetName ? " cur" : "");
-      row.innerHTML = `<span class="htext"></span><span class="hmeta">加载中…</span><button class="pm-del" type="button" title="删除此预设">✕</button>`;
+      row.innerHTML = `<span class="htext"></span><span class="hmeta">加载中…</span>
+        <span class="pm-acts">
+          <button class="pm-act" data-act="rename" type="button" title="改名">改</button>
+          <button class="pm-act" data-act="duplicate" type="button" title="复制">复</button>
+        </span>
+        <button class="pm-del" type="button" title="删除此预设">✕</button>`;
       row.querySelector(".htext").textContent = name;
       row.title = "点击应用此预设";
       row.querySelector(".pm-del").setAttribute("aria-label", "删除预设 " + name);
@@ -1368,21 +1427,18 @@ function renderLib() {
         meta.textContent = `${["同参考", "情感音频", "向量", "文本"][d.emo_control_method] ?? "-"} · ${d.prompt_audio ? "含音频" : "无音频"} · temp ${adv.temperature ?? "-"}`;
       });
       row.addEventListener("click", async (e) => {
-        if (e.target.closest(".pm-del")) return;
+        if (e.target.closest(".pm-del") || e.target.closest(".pm-act")) return;
         if (await applyPresetByName(name)) renderLib();
+      });
+      row.querySelectorAll(".pm-act").forEach((btn) => {
+        btn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          await pmPresetAction(name, btn.dataset.act);
+        });
       });
       row.querySelector(".pm-del").addEventListener("click", async (e) => {
         e.stopPropagation();
-        if (!await uiConfirm({ title: "删除预设", body: `确定删除预设「${name}」？此操作不可恢复。`, okText: "删除", danger: true })) return;
-        try {
-          const r = await fetch("/presets/" + encodeURIComponent(name), { method: "DELETE" });
-          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "删除失败");
-          if (curPresetName === name) { curPresetName = ""; updateGenSummary(); }
-          showActionHint("已删除预设: " + name);
-          await refreshPresets();
-          renderLib();
-          refreshPmList();
-        } catch (err) { showActionError("删除预设失败: " + err.message); }
+        await pmPresetAction(name, "delete");
       });
       box.appendChild(row);
     }
@@ -1444,21 +1500,49 @@ $("btnLibRefresh").addEventListener("click", async () => {
   renderLib();
   if (!presetNamesCache.length) showActionHint("暂无预设");
 });
-$("btnLibSave").addEventListener("click", async () => {
-  const name = await uiPrompt({ title: "保存当前为预设", placeholder: "请输入预设名称", value: curPresetName || "" });
-  if (name === null || name === false) return;
-  const trimmed = name.trim();
-  if (!trimmed) { showActionError("请输入预设名称"); return; }
+/* 保存预设统一入口：收集当前表单 → POST /presets；同名返回 409 时弹确认后
+   带 overwrite 重发。返回成功与否，调用方各自给出提示位置。 */
+async function savePresetByName(name, onDone) {
   const fd = new FormData();
-  fd.append("name", trimmed);
+  fd.append("name", name);
   collectPresetState(fd);
   const spkF = $("spkFile").files[0];
   if (spkF) fd.append("prompt_audio", spkF);
   const emoF = $("emoFile").files[0];
   if (emoF) fd.append("emo_audio", emoF);
+  let overwrite = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (overwrite) fd.set("overwrite", "true");
+    const r = await fetch(`${API}/presets`, { method: "POST", body: fd });
+    if (r.ok) {
+      presetDetailCache.delete(name);
+      await (onDone || (() => {}));
+      return true;
+    }
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 409 && !overwrite) {
+      const yes = await uiConfirm({
+        title: "覆盖预设",
+        body: `预设「${name}」已存在，是否用当前参数覆盖？`,
+        okText: "覆盖保存",
+        danger: true,
+      });
+      if (!yes) return false;
+      overwrite = true;
+      continue;
+    }
+    throw new Error(j.detail || "保存失败");
+  }
+  return false;
+}
+
+$("btnLibSave").addEventListener("click", async () => {
+  const name = await uiPrompt({ title: "保存当前为预设", placeholder: "请输入预设名称", value: curPresetName || "" });
+  if (name === null || name === false) return;
+  const trimmed = name.trim();
+  if (!trimmed) { showActionError("请输入预设名称"); return; }
   try {
-    const r = await fetch("/presets", { method: "POST", body: fd });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "保存失败");
+    if (!await savePresetByName(trimmed)) return;
     curPresetName = trimmed;
     showActionHint("预设已保存: " + trimmed);
     await refreshPresets();
@@ -1470,7 +1554,7 @@ $("btnLibSave").addEventListener("click", async () => {
 
 async function loadExamples() {
   try {
-    const j = await (await fetch("/examples")).json();
+    const j = await (await fetch(`${API}/examples`)).json();
     exCache = j.examples || [];
   } catch (err) { exCache = []; }
 }
@@ -1534,7 +1618,7 @@ function renderHistory() {
     del.addEventListener("click", async (e) => {
       e.stopPropagation();
       try {
-        const r = await fetch("/history/" + encodeURIComponent(it.id), { method: "DELETE" });
+        const r = await fetch(`${API}/history/` + encodeURIComponent(it.id), { method: "DELETE" });
         if (!r.ok) throw new Error("删除失败");
         if (histCurId === it.id) histCurId = "";
         await refreshHistory();
@@ -1546,7 +1630,7 @@ function renderHistory() {
 
 async function refreshHistory() {
   try {
-    const r = await (await fetch("/history")).json();
+    const r = await (await fetch(`${API}/history`)).json();
     histItems = r.items || [];
     $("histAuto").checked = !!r.auto_clean;
     $("histNote").textContent = `本次运行生成 · 自动清理保留最近 ${r.limit} 条`;
@@ -1565,7 +1649,7 @@ $("histAuto").addEventListener("change", async (e) => {
   const fd = new FormData();
   fd.append("auto_clean", e.target.checked);
   try {
-    const r = await (await fetch("/history/config", { method: "POST", body: fd })).json();
+    const r = await (await fetch(`${API}/history/config`, { method: "POST", body: fd })).json();
     $("histAuto").checked = !!r.auto_clean;
   } catch (err) { showActionError("切换自动清理失败"); }
 });
@@ -1579,7 +1663,7 @@ $("histClear").addEventListener("click", async () => {
     danger: true,
   })) return;
   try {
-    await fetch("/history", { method: "DELETE" });
+    await fetch(`${API}/history`, { method: "DELETE" });
     histCurId = "";
     await refreshHistory();
   } catch (err) { showActionError("清空历史失败"); }
@@ -1598,7 +1682,7 @@ function clearGlossaryError() {
 
 async function renderGlossary() {
   try {
-    const g = (await (await fetch("/glossary")).json()).glossary || {};
+    const g = (await (await fetch(`${API}/glossary`)).json()).glossary || {};
     const keys = Object.keys(g);
     const box = $("glTable");
     box.replaceChildren();
@@ -1634,7 +1718,7 @@ $("btnAddTerm").addEventListener("click", async () => {
   fd.append("reading_zh", $("glZh").value);
   fd.append("reading_en", $("glEn").value);
   try {
-    const r = await fetch("/glossary", { method: "POST", body: fd });
+    const r = await fetch(`${API}/glossary`, { method: "POST", body: fd });
     const j = await r.json();
     if (!r.ok) { showGlossaryError("添加术语失败: " + (j.detail || "")); return; }
     $("glTerm").value = ""; $("glZh").value = ""; $("glEn").value = "";
@@ -1675,13 +1759,13 @@ let pmListCache = [];       // all preset names
 let pmCurName = "";
 function pmFlash(msg, isErr) {
   pmHint.textContent = msg;
-  pmHint.style.color = isErr ? cssVar("--primary") : "";
+  pmHint.style.color = isErr ? cssVar("--danger") : "";
 }
 const EMO_MODE_NAMES = ["与音色参考相同", "情感参考音频", "情感向量", "情感描述文本"];
 
 async function refreshPmList() {
   try {
-    const r = await (await fetch("/presets")).json();
+    const r = await (await fetch(`${API}/presets`)).json();
     pmListCache = r.presets || [];
     renderPmCards();
   } catch (err) {
@@ -1710,6 +1794,10 @@ async function renderPmCards() {
     card.innerHTML = `
       <span class="pm-name"></span>
       <span class="pm-meta"><span class="pm-m1">加载中…</span></span>
+      <span class="pm-acts">
+        <button class="pm-act" data-act="rename" type="button" title="改名">改</button>
+        <button class="pm-act" data-act="duplicate" type="button" title="复制">复</button>
+      </span>
       <button class="pm-del" type="button" title="删除此预设">✕</button>`;
     card.querySelector(".pm-name").textContent = name;
     card.querySelector(".pm-del").setAttribute("aria-label", "删除预设 " + name);
@@ -1722,42 +1810,75 @@ async function renderPmCards() {
     });
     // click card → apply preset (jump to gen page)
     card.addEventListener("click", async (e) => {
-      if (e.target.closest(".pm-del")) return; // delete handled below
+      if (e.target.closest(".pm-del") || e.target.closest(".pm-act")) return;
       pmCurName = name;
       if (await applyPresetByName(name)) switchPage("gen");
+    });
+    // 改名 / 复制 / 删除共用一组操作
+    card.querySelectorAll(".pm-act").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await pmPresetAction(name, btn.dataset.act);
+      });
     });
     // click ✕ → delete with confirm
     card.querySelector(".pm-del").addEventListener("click", async (e) => {
       e.stopPropagation();
-      if (!await uiConfirm({ title: "删除预设", body: `确定删除预设「${name}」？此操作不可恢复。`, okText: "删除", danger: true })) return;
-      try {
-        const r = await fetch("/presets/" + encodeURIComponent(name), { method: "DELETE" });
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "删除失败");
-        presetDetailCache.delete(name);
-        if (pmCurName === name) pmCurName = "";
-        pmFlash("已删除预设: " + name);
-        await refreshPmList();
-        await refreshPresets();
-      } catch (err) { pmFlash("删除失败: " + err.message, true); }
+      await pmPresetAction(name, "delete");
     });
     pmCards.appendChild(card);
   }
+}
+
+/* 预设操作统一处理：rename / duplicate / delete。
+   刷新两处列表（管理页 + 生成页库区）并同步各处缓存与选中态。 */
+async function pmPresetAction(name, act) {
+  try {
+    if (act === "rename") {
+      const input = await uiPrompt({ title: "预设改名", placeholder: "新名称", value: name });
+      if (input === null || input === false) return;
+      const trimmed = String(input).trim();
+      if (!trimmed) { pmFlash("新名称不能为空", true); return; }
+      if (trimmed === name) return;
+      const r = await fetch(`${API}/presets/` + encodeURIComponent(name) + "/rename", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "改名失败");
+      const j = await r.json();
+      presetDetailCache.delete(name);
+      if (pmCurName === name) pmCurName = j.name || trimmed;
+      if (curPresetName === name) { curPresetName = j.name || trimmed; updateGenSummary(); }
+      pmFlash(`已改名: ${name} → ${j.name || trimmed}`);
+    } else if (act === "duplicate") {
+      const r = await fetch(`${API}/presets/` + encodeURIComponent(name) + "/duplicate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "复制失败");
+      const j = await r.json();
+      pmFlash(`已复制为: ${j.name}`);
+    } else if (act === "delete") {
+      if (!await uiConfirm({ title: "删除预设", body: `确定删除预设「${name}」？此操作不可恢复。`, okText: "删除", danger: true })) return;
+      const r = await fetch(`${API}/presets/` + encodeURIComponent(name), { method: "DELETE" });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "删除失败");
+      presetDetailCache.delete(name);
+      if (pmCurName === name) pmCurName = "";
+      if (curPresetName === name) { curPresetName = ""; updateGenSummary(); }
+      pmFlash("已删除预设: " + name);
+    }
+    await refreshPmList();
+    await refreshPresets();
+    renderLib();
+  } catch (err) { pmFlash("操作失败: " + err.message, true); }
 }
 pmSearch.addEventListener("input", renderPmCards);
 $("btnPmRefresh").addEventListener("click", () => { presetDetailCache.clear(); refreshPmList(); pmFlash("已刷新"); });
 $("btnPmCreate").addEventListener("click", async () => {
   const name = $("pmName").value.trim();
   if (!name) { pmFlash("请输入预设名称", true); return; }
-  const fd = new FormData();
-  fd.append("name", name);
-  collectPresetState(fd);
-  const spkF = $("spkFile").files[0];
-  if (spkF) fd.append("prompt_audio", spkF);
-  const emoF = $("emoFile").files[0];
-  if (emoF) fd.append("emo_audio", emoF);
   try {
-    const r = await fetch("/presets", { method: "POST", body: fd });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "创建失败");
+    if (!await savePresetByName(name)) return;
     $("pmName").value = "";
     pmCurName = name;
     pmFlash("预设已创建: " + name);
@@ -1795,7 +1916,7 @@ function mmElapsedTimer(label) {
 }
 async function refreshModelPage() {
   try {
-    const s = await (await fetch("/model")).json();
+    const s = await (await fetch(`${API}/model`)).json();
     const phase = s.phase || (s.loaded ? "ready" : "unloaded");
     const stateNames = {
       ready: "已加载", loading: "加载中", reloading: "重载中",
@@ -1831,7 +1952,7 @@ $("btnModelLoad").addEventListener("click", async () => {
   mmFlashErr("");
   const iv = mmElapsedTimer("加载中");     // 首次加载 30~120s，状态区实时计时
   try {
-    const r = await (await fetch("/model/load", { method: "POST" })).json();
+    const r = await (await fetch(`${API}/model/load`, { method: "POST" })).json();
     if (!r.ok) throw new Error(r.error || "加载失败");
     pollStatus();
   } catch (e) { mmFlashErr(e.message); }
@@ -1843,7 +1964,7 @@ $("btnModelLoad").addEventListener("click", async () => {
 $("btnModelUnload").addEventListener("click", async () => {
   if (!await uiConfirm({ title: "卸载模型", body: "卸载后首次生成需重新加载（约 30~60 秒）。", okText: "卸载" })) return;
   try {
-    const r = await (await fetch("/model/unload", { method: "POST" })).json();
+    const r = await (await fetch(`${API}/model/unload`, { method: "POST" })).json();
     if (!r.ok) throw new Error(r.error || "卸载失败");
     await refreshModelPage();
     pollStatus();
@@ -1862,7 +1983,7 @@ $("btnModelRestart").addEventListener("click", async () => {
     for (const k of CFG_KEYS) body[k] = $(CFG_BOX[k]).checked;
     body.diffusion_steps = parseInt($("cfgSteps").value, 10);
     body.inference_cfg_rate = parseFloat($("cfgRate").value);
-    const r = await (await fetch("/model/restart", {
+    const r = await (await fetch(`${API}/model/restart`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -1899,7 +2020,7 @@ $("btnCfgSave").addEventListener("click", async () => {
   body.diffusion_steps = parseInt($("cfgSteps").value, 10);
   body.inference_cfg_rate = parseFloat($("cfgRate").value);
   try {
-    const r = await fetch("/model/config", {
+    const r = await fetch(`${API}/model/config`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -1914,14 +2035,39 @@ $("btnCfgSave").addEventListener("click", async () => {
   } catch (e) { mmFlashErr("保存配置失败: " + e.message); }
 });
 
+/* ---------------- keyboard shortcuts ----------------
+   Ctrl+Enter        生成语音（生成页可见时）
+   Space             播放/暂停当前结果（焦点不在输入框时）
+   Ctrl+S            保存当前为预设
+   Esc               关闭模态框（已由 _modalSetup 注册） */
+document.addEventListener("keydown", (e) => {
+  // 模态框打开时不响应快捷键（Esc 关窗已由 modal 自己处理）
+  if (!$("modalMask").hidden) return;
+  // 输入控件里只放行 Ctrl+Enter / Ctrl+S（修饰键组合不与打字冲突）
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    if (!genBtn.disabled) genBtn.click();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+    e.preventDefault();
+    $("btnLibSave").click();
+    return;
+  }
+  if (e.key === " " && !typing && trim.buffer) {
+    e.preventDefault();
+    if (player.paused) { player.play(); bigPlayIcon.innerHTML = PAUSE2; }
+    else { player.pause(); bigPlayIcon.innerHTML = PLAY2; }
+  }
+});
+
 /* ---------------- init (single entry point) ---------------- */
 applyTheme(localStorage.getItem("theme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
 /* 侧边栏初始状态：没有保存过偏好就按窗口宽度决定（宽屏展开，窄屏收起） */
 const _savedHist = localStorage.getItem(HIST_KEY);
 histSetCollapsed(_savedHist === null ? window.innerWidth < 1360 : _savedHist === "1", false);
 refreshHistory();
-pollStatus();
-pollMetrics();
 bindSliders();
 emoVisible();
 updateSegments();

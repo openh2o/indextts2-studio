@@ -124,3 +124,59 @@ def clean_legacy_prompts(prompts_dir: str) -> None:
                 os.remove(path)
             except OSError:
                 pass
+
+
+PROMPTS_KEEP = 30  # cap on cached reference wavs; oldest evicted first
+
+
+def cap_prompt_files(prompts_dir: str, keep: int = PROMPTS_KEEP) -> int:
+    """Evict prompt wavs beyond `keep`, oldest mtime first (true LRU: callers
+    touch the file on cache hit, so frequently used voices survive).
+
+    Content-hash naming means every distinct reference audio ever uploaded
+    leaves a file here forever without this cap. Eviction is always safe:
+    the model's feature cache is keyed by path, and re-uploading the same
+    audio re-creates the same path, costing only one re-extraction.
+    Returns the number of files removed.
+    """
+    try:
+        entries = [os.path.join(prompts_dir, n) for n in os.listdir(prompts_dir) if n.endswith(".wav")]
+    except OSError:
+        return 0
+    excess = len(entries) - keep
+    if excess <= 0:
+        return 0
+    entries.sort(key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
+    removed = 0
+    for path in entries[:excess]:
+        try:
+            os.remove(path)
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+# Upload validation ----------------------------------------------------------
+# 上传只做大小上限 + 常见音频容器的魔数嗅探：拦截改名的文本/图片这类明显
+# 不是音频的文件，在落盘前给出可读的 4xx。完整解码校验仍由推理侧 librosa
+# 承担（失败经 SSE 报错），这里不做重解码。
+
+AUDIO_MAX_BYTES = 20 * 1024 * 1024
+
+
+def looks_like_audio(data: bytes) -> bool:
+    """Cheap magic-byte sniff: wav / mp3 (ID3 or frame sync) / flac / ogg / m4a."""
+    if not data or len(data) < 12:
+        return False
+    if data[:4] == b"RIFF":
+        return data[8:12] == b"WAVE"
+    if data[:4] == b"OggS" or data[:4] == b"fLaC":
+        return True
+    if data.startswith(b"ID3"):
+        return True  # ID3v2-tagged MP3
+    if data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
+        return True  # raw MP3 frame sync (first 11 bits set)
+    if data[4:8] == b"ftyp":
+        return True  # mp4/m4a
+    return False

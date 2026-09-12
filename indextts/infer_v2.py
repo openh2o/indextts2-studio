@@ -416,6 +416,9 @@ class IndexTTS2:
             # automatically generate emotion vectors from text prompt
             if emo_text is None:
                 emo_text = text  # use main text prompt
+            # Qwen 情感分析是一次 LLM 前向（数秒），单独立个阶段上报，
+            # 避免这段在 0% 无反馈地卡着
+            self._set_gr_progress(0.03, "emotion analysis...|qwen")
             emo_dict = self.qwen_emo.inference(emo_text)
             print(f"detected emotion vectors from text: {emo_dict}")
             # convert ordered dict to list of vectors; the order is VERY important!
@@ -552,6 +555,9 @@ class IndexTTS2:
         s2mel_time = 0
         bigvgan_time = 0
         has_warned = False
+        # 上一次生成是否触到 max_mel_tokens 上限：server 读取后随 done 事件提示前端
+        # （文本被静默截断，用户必须知情），下一次生成前复位。
+        self.mel_tokens_capped = False
         silence = None # for stream_return
         for seg_idx, sent in enumerate(segments):
             seg_lo = 0.2 + 0.7 * seg_idx / segments_count
@@ -607,7 +613,7 @@ class IndexTTS2:
                         cond_lengths=torch.tensor([spk_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_cond_lengths=torch.tensor([emo_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_vec=emovec,
-                        do_sample=True,
+                        do_sample=do_sample,
                         top_p=top_p,
                         top_k=top_k,
                         temperature=temperature,
@@ -629,6 +635,7 @@ class IndexTTS2:
                         category=RuntimeWarning
                     )
                     has_warned = True
+                    self.mel_tokens_capped = True
 
                 code_lens = torch.tensor([codes.shape[-1]], device=codes.device, dtype=codes.dtype)
                 #                 if verbose:

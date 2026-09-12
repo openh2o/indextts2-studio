@@ -158,3 +158,41 @@ def delete_preset(name: str) -> bool:
 def preset_exists(name: str) -> bool:
     """Return whether a preset with the given name already exists."""
     return _preset_dir(name).exists()
+
+
+def rename_preset(old_name: str, new_name: str) -> str:
+    """
+    Rename a preset directory.
+
+    Returns the sanitized new name.
+    Raises ValueError if the source preset is missing or the target name exists.
+    """
+    old_dir = _preset_dir(old_name)
+    if not old_dir.is_dir():
+        raise ValueError(f"预设「{old_name}」不存在")
+    new_safe = safe_preset_name(new_name)
+    new_dir = get_presets_dir() / new_safe
+    if new_dir == old_dir:
+        return new_safe
+    if new_dir.exists():
+        raise ValueError(f"预设「{new_safe}」已存在")
+    old_dir.rename(new_dir)
+    return new_safe
+
+
+def duplicate_preset(src_name: str, dst_name: str) -> str:
+    """
+    Copy a preset directory under a new name.
+
+    Returns the sanitized destination name.
+    Raises ValueError if the source preset is missing or the target name exists.
+    """
+    src_dir = _preset_dir(src_name)
+    if not src_dir.is_dir():
+        raise ValueError(f"预设「{src_name}」不存在")
+    dst_safe = safe_preset_name(dst_name)
+    dst_dir = get_presets_dir() / dst_safe
+    if dst_dir.exists():
+        raise ValueError(f"预设「{dst_safe}」已存在")
+    shutil.copytree(src_dir, dst_dir)
+    return dst_safe

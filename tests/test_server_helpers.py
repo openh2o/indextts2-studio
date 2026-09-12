@@ -9,8 +9,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from indextts.utils.server_helpers import (
+    AUDIO_MAX_BYTES,
+    cap_prompt_files,
     clean_legacy_prompts,
     fix_mojibake,
+    looks_like_audio,
     output_name,
     prompt_file,
     safe_title,
@@ -144,3 +147,65 @@ def test_clean_legacy_prompts_removes_only_mismatched(tmp_path):
     assert os.path.exists(other)
     assert not legacy.exists()
     assert not stale.exists()
+
+
+# ---- looks_like_audio -------------------------------------------------------
+
+def _wav_bytes(n=64):
+    # minimal RIFF/WAVE header (12-byte magic) + payload
+    return b"RIFF" + (n - 8).to_bytes(4, "little") + b"WAVE" + b"\x00" * (n - 12)
+
+
+def test_looks_like_audio_accepts_common_containers():
+    assert looks_like_audio(_wav_bytes())
+    assert looks_like_audio(b"ID3" + b"\x04\x00\x00" + b"\x00" * 20)  # mp3 with ID3v2 tag
+    assert looks_like_audio(b"\xff\xfb\x90\x00" + b"\x00" * 20)      # raw mp3 frame
+    assert looks_like_audio(b"OggS\x00\x02" + b"\x00" * 20)         # ogg
+    assert looks_like_audio(b"fLaC" + b"\x00" * 20)                  # flac
+    # m4a: size(4) + 'ftyp' at offset 4
+    assert looks_like_audio(b"\x00\x00\x00\x20" + b"ftypM4A " + b"\x00" * 8)
+
+
+def test_looks_like_audio_rejects_non_audio():
+    assert not looks_like_audio(b"")                                   # empty
+    assert not looks_like_audio(b"\x00" * 64)                         # zeros
+    assert not looks_like_audio(open(__file__, "rb").read(200))        # python source
+    # RIFF but not WAVE (e.g. AVI renamed to .wav)
+    assert not looks_like_audio(b"RIFF\x00\x00\x00\x00AVI " + b"\x00" * 20)
+    # < 12 bytes can't be sniffed
+    assert not looks_like_audio(b"RIFF")
+
+
+def test_audio_max_bytes_is_20mb():
+    assert AUDIO_MAX_BYTES == 20 * 1024 * 1024
+
+
+# ---- cap_prompt_files -------------------------------------------------------
+
+def test_cap_prompt_files_evicts_oldest_beyond_keep(tmp_path):
+    d = tmp_path / "prompts"
+    d.mkdir()
+    files = []
+    for i in range(5):
+        p = d / f"spk_{i}.wav"
+        p.write_bytes(_wav_bytes())
+        # distinct, increasing mtimes (same-timestamp ordering would be ambiguous)
+        os.utime(p, (1_000_000 + i * 10, 1_000_000 + i * 10))
+        files.append(str(p))
+    removed = cap_prompt_files(str(d), keep=3)
+    assert removed == 2
+    assert not os.path.exists(files[0]) and not os.path.exists(files[1])  # oldest dropped
+    assert all(os.path.exists(f) for f in files[2:])                      # newest kept
+
+
+def test_cap_prompt_files_noop_when_under_limit(tmp_path):
+    d = tmp_path / "prompts"
+    d.mkdir()
+    for i in range(2):
+        (d / f"spk_{i}.wav").write_bytes(_wav_bytes())
+    assert cap_prompt_files(str(d), keep=30) == 0
+    assert len(os.listdir(d)) == 2
+
+
+def test_cap_prompt_files_missing_dir_is_safe(tmp_path):
+    assert cap_prompt_files(str(tmp_path / "nope"), keep=30) == 0

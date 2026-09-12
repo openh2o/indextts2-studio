@@ -194,7 +194,9 @@ def _start_tts(server, monkeypatch, tmp_path, client_id="client-a", infer_impl=N
             self.file = self
             self._payload = payload
             self.read = lambda: payload
-    spk = _File(b"spk-bytes")
+    # valid RIFF/WAVE header so the upload sniff in do_tts accepts the stub
+    _wav = b"RIFF" + (1024).to_bytes(4, "little") + b"WAVE" + b"\x00" * 52
+    spk = _File(_wav)
     # Direct call (no TestClient/httpx): FastAPI does not resolve Form() or
     # File(None) defaults here, so every defaulted parameter must be passed.
     response = server.do_tts(

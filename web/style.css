@@ -9,6 +9,9 @@
   --border: #e3e0da;
   --primary: #d2372e;
   --primary-ink: #ffffff;
+  /* --danger：错误/删除/警告徽章专用，与品牌主色 --primary 解耦——
+     主按钮红与"危险操作红"可以独立调整，不再同源 */
+  --danger: #d5333a;
   --accent: #1f5fe0;
   --ok: #1e9e5a;
   --warn: #c07d10;
@@ -31,6 +34,7 @@ html[data-theme="dark"] {
   --border: #2e2c29;
   --primary: #e5503f;
   --primary-ink: #ffffff;
+  --danger: #f2555a;
   --accent: #7ca1f2;
   --ok: #4cc38a;
   --warn: #e0a437;
@@ -149,6 +153,8 @@ html[data-theme="dark"] select {
 textarea { resize: none; overflow: hidden; min-height: 96px; max-height: 40vh; }
 /* 合成文本框：固定高度 + 内部滚动，页面高度不随文本增长，长文本可滚动查看 */
 #text { font-size: 16px; line-height: 1.7; height: 150px; min-height: 0; max-height: none; overflow-y: auto; padding: 13px 14px; }
+/* 字数计数：接近上限时警示（配合 maxlength=2000 与后端 413 校验） */
+#charCount.warn { color: var(--danger); font-weight: 700; }
 textarea:focus, select:focus, input:focus {
   outline: none; border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
@@ -323,17 +329,19 @@ textarea:focus, select:focus, input:focus {
 }
 .btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--border); font-weight: 600; }
 .btn.ghost:hover { background: var(--surface-2); }
-.btn.ghost.danger { color: var(--primary); }
+.btn.ghost.danger { color: var(--danger); }
+.btn.danger { background: var(--danger); color: #fff; }
+.btn.danger:hover { filter: brightness(1.08); box-shadow: 0 6px 18px color-mix(in srgb, var(--danger) 35%, transparent); }
 .btn.ghost.mini { padding: 8px 13px; font-size: 12.5px; border-radius: 9px; flex: none; }
 .hint { font-size: 11.5px; color: var(--faint); min-height: 15px; text-align: center; margin-top: 7px; }
-.hint.error { color: var(--primary); }
+.hint.error { color: var(--danger); }
 
 /* ---------- GLOSSARY ---------- */
 .gl-error {
   margin-top: 8px; padding: 8px 10px; border-radius: 8px;
-  font-size: 12.5px; color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 10%, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--primary) 35%, var(--border));
+  font-size: 12.5px; color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
 }
 
 /* ---------- RIGHT: result showcase ---------- */
@@ -392,11 +400,18 @@ textarea:focus, select:focus, input:focus {
 .pstep.running { color: var(--warn); border-color: var(--warn); }
 .pstep.done { color: var(--ok); border-color: var(--ok); background: color-mix(in srgb, var(--ok) 8%, var(--surface)); }
 .psteps i { flex: none; width: 12px; height: 1px; background: var(--border); }
+/* 触顶截断提示：warn 色而非 danger —— 音频已生成，只是结尾被截，可修参重试 */
+.capnote {
+  margin: 10px 2px 0; padding: 9px 13px; border-radius: 10px; font-size: 13px;
+  background: color-mix(in srgb, var(--warn) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--warn) 38%, var(--border));
+  color: var(--warn);
+}
 .err {
   display: none; margin: 12px 2px; padding: 10px 13px; border-radius: 10px; font-size: 13px;
-  background: color-mix(in srgb, var(--primary) 12%, var(--surface));
-  border: 1px solid color-mix(in srgb, var(--primary) 40%, var(--border));
-  color: var(--primary); overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  color: var(--danger); overflow-wrap: anywhere;
 }
 .err.on { display: block; }
 
@@ -463,7 +478,7 @@ textarea:focus, select:focus, input:focus {
   opacity: 0; transition: opacity .15s ease, color .15s ease, background .15s ease;
 }
 .hist-item:hover .pm-del { opacity: 1; }
-.hist-item .pm-del:hover { color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); }
+.hist-item .pm-del:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
 
 /* gen summary line above CTA */
 .gen-summary {
@@ -543,7 +558,7 @@ footer a { color: var(--muted); }
 @keyframes modalIn { from { transform: translateY(8px) scale(.98); opacity: 0; } }
 .modal-title { font-size: 15px; font-weight: 700; }
 .modal-body { font-size: 13.5px; color: var(--muted); line-height: 1.65; overflow-wrap: anywhere; }
-.modal-error { font-size: 12.5px; color: var(--primary); }
+.modal-error { font-size: 12.5px; color: var(--danger); }
 .modal-foot { display: flex; gap: 10px; justify-content: flex-end; align-items: center; margin-top: 2px; }
 .modal-foot .btn { padding: 9px 18px; font-size: 13.5px; }
 .modal-foot input[type="text"] { flex: 1; min-width: 0; padding: 9px 12px; font-size: 13.5px; }
@@ -594,7 +609,7 @@ main#pages { display: block; }
 .meter b { color: var(--ink); font-weight: 600; white-space: nowrap; }
 .meter .bar { height: 4px; border-radius: 2px; background: var(--meter-track); overflow: hidden; }
 .meter .bar i { display: block; height: 100%; width: 0%; background: var(--accent); border-radius: 2px; transition: width .6s ease; }
-.meter.hot .bar i { background: var(--primary); }
+.meter.hot .bar i { background: var(--danger); }
 
 /* ---------- manage pages shared ---------- */
 .mg-card { max-width: 1080px; margin: 0 auto; width: 100%; }
@@ -631,7 +646,7 @@ main#pages { display: block; }
 .qzb.near { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
 .qzb.drop { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); border-color: color-mix(in srgb, var(--warn) 32%, transparent); }
 .qzb.na { color: var(--faint); background: var(--surface-2); border-color: var(--border); }
-.qzb.warn { color: var(--primary); background: color-mix(in srgb, var(--primary) 10%, transparent); border-color: color-mix(in srgb, var(--primary) 32%, transparent); }
+.qzb.warn { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); border-color: color-mix(in srgb, var(--danger) 32%, transparent); }
 
 /* acceleration switch rows get looser spacing than the ops panel */
 .mg-col .switch { margin-top: 12px; font-size: 13.5px; }
@@ -673,8 +688,28 @@ main#pages { display: block; }
   cursor: pointer; display: grid; place-items: center; font-size: 13px; line-height: 1;
   transition: color .15s ease, background .15s ease;
 }
-.pm-del:hover { color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, transparent); }
+.pm-del:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
 .pm-empty { grid-column: 1 / -1; color: var(--faint); font-size: 12.5px; padding: 18px 4px; text-align: center; }
+
+/* 预设卡片操作按钮组（改名/复制，hover 浮出，与删除按钮并排） */
+.pm-acts {
+  position: absolute; top: 8px; right: 34px;
+  display: flex; gap: 2px;
+  opacity: 0; transition: opacity .15s ease;
+}
+.pm-card:hover .pm-acts, .hist-item:hover .pm-acts { opacity: 1; }
+.pm-act {
+  border: none; border-radius: 5px; background: none; color: var(--faint);
+  cursor: pointer; display: grid; place-items: center;
+  width: 22px; height: 22px; padding: 0;
+  font-size: 12px; line-height: 1;
+  transition: color .15s ease, background .15s ease;
+}
+.pm-act:hover { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.pm-act:disabled { opacity: .4; cursor: wait; }
+/* 库区列表行的操作按钮（同一套） */
+.hist-item .pm-acts { top: 6px; right: 30px; }
+.hist-item .pm-act { width: 20px; height: 20px; font-size: 11px; }
 
 /* responsive */
 /* header 单行预算约 1230px。更窄时收起波形，仪表条与 tabs+按钮同落第二行：

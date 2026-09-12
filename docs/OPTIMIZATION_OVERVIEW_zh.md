@@ -102,14 +102,16 @@
 
 | 域 | 路由 |
 |---|---|
-| 系统 | `/health`、`/metrics`（CPU/内存/GPU/显存仪表） |
+| 系统 | `/health`、`/status`（模型态+仪表合并端点，Header 每 2s 轮询此一处）、`/metrics`（CPU/内存/GPU/显存仪表） |
 | 页面/资源 | `/`、`/assets/{name}` |
 | 模型 | `GET /model`、`POST /model/config`、`/model/load`、`/model/unload`、`/model/restart` |
 | 生成 | `POST /tts`、`POST /tts/{id}/cancel`、`POST /tts/{id}/stop`、`GET /jobs/current`、`GET /jobs/{id}` |
 | 音频 | `GET /audio/{name}` |
 | 历史 | `GET /history`、`POST /history/config`、`DELETE /history`、`DELETE /history/{id}` |
-| 预设 | `GET/POST /presets`、`GET /presets/{name}`、`GET /presets/{name}/audio/{kind}`、`DELETE /presets/{name}` |
+| 预设 | `GET/POST /presets`、`GET /presets/{name}`、`GET /presets/{name}/audio/{kind}`、`DELETE /presets/{name}`、`POST /presets/{name}/rename`、`POST /presets/{name}/duplicate` |
 | 辅助 | `GET /examples[/name]`、`POST /segments`（BPE 分句预览）、`GET/POST/DELETE /glossary`（术语读音） |
+
+> JSON 接口的正式路径为 `/api/v1/*`；旧根路径（`/model`、`/history` 等）307 重定向兼容，便于脚本和书签平滑过渡。
 
 ### 3.2 前端（`web/`，无框架、无构建、无 npm）
 
@@ -254,18 +256,14 @@
 
 ## 九、尚未完成 / 已知问题
 
-以下为 [OPTIMIZATION_PLAN_zh.md](OPTIMIZATION_PLAN_zh.md) 中**已识别但未实施**的项（截至 2026-09-12）：
+截至 2026-09-12（工作区批次后更新）。此前清单中的 `do_sample` 死参数（P1-8）、深色 FOUC（P0-1）、静态缓存头（P1-7）、预设编辑/改名/复制/同名确认（P1-2/P1-3）、输入校验（P1-4 文本上限 + P1-5 上传校验 + P1-6 Qwen 阶段提示）、mel 触顶前端提示（P1-4 尾巴）、prompts/ 容量上限（P1-5 尾巴）、`--danger` 变量（P1-13）、快捷键、API 版本化与轮询合并（P2）均已完成。
 
 | 项 | 现状 |
 |---|---|
-| **`do_sample` 死参数**（P1-8） | `infer_v2.py` 把 `do_sample` 从 kwargs 中 pop 出来但生成时用的是字面量 `True`——WebUI 上的采样开关完全无效，永远采样模式运行 |
-| **深色模式首屏闪烁 FOUC**（P0-1） | 主题仍由 body 末尾的 JS 注入，`<head>` 无同步内联脚本，深色用户刷新会闪一帧白 |
-| **静态资源缓存头**（P1-7） | `/assets` 无 `Cache-Control`，版本号靠手工维护（当前 `?v=20260912`） |
 | **s2mel 瓶颈**（P1-9） | `diffusion_steps` 默认仍 25（文档建议 10~16，属音质取舍，待按听感确认后调整） |
-| **预设编辑**（P1-2 / P1-3） | 仍只有创建/删除，无编辑/改名/复制；同名保存静默覆盖 |
-| **输入校验**（P1-4 / P1-5 / P1-6） | 文本无长度上限（超长静默截断）、上传无大小/格式校验、情感文本模式首次加载 Qwen 模型无提示 |
-| **CSS `--danger` 变量**（P1-13） | 已拆出 `--accent`，但错误/删除色仍与 `--primary` 同源 |
-| **API 版本化 / 快捷键 / 轮询合并**（P2） | 均未动 |
+| **header 布局**（P1-12） | 仍用 order 重排技巧；建议改 CSS Grid `grid-template-areas`（纯重构，未动） |
+| **预设卡片渲染合并**（P1-16） | 生成页库区与预设管理页仍两套渲染，操作按钮接线重复（纯重构，未动） |
+| **OpenAPI 摘要 / DynamicCache**（P2） | 未动；transformers 已 pin 4.52.1，`past_key_values` 弃用警告顺延到升版时一并处理 |
 
 ---
 
@@ -282,6 +280,6 @@
 | `6531639` | 09-11 | outputs 14 天保留；快捷情感 chips；hash 路由；预设详情缓存；后台暂停轮询；耗时预估；主题化对话框 |
 | `2b38eee` | 09-11 | 修复放弃等待后加载面板不收起 |
 | `f703ff3` | 09-11 | 截图目录 gitignore |
-| **工作区（待提交）** | 09-12 | 任务停止+模型重建、job 快照/刷新恢复、死锁等 3 bug 修复+回归测试、模型 phase 状态机、显存回收、工作区草稿（IndexedDB）、应用式布局、参考音频播放器重构、从头播放、`infer_generator` 整体 no_grad、CLI 精简、v1 测试守卫 |
+| **工作区（待提交）** | 09-12 | 任务停止+模型重建、job 快照/刷新恢复、死锁等 3 bug 修复+回归测试、模型 phase 状态机、显存回收、工作区草稿（IndexedDB）、应用式布局、参考音频播放器重构、从头播放、`infer_generator` 整体 no_grad、CLI 精简、v1 测试守卫、`do_sample` 修复、FOUC 内联主题脚本、静态缓存头+内容指纹版本号、预设改名/复制/同名确认+API 版本化（`/api/v1` + 旧路径 307）、轮询合并（`/status` 单次往返）、快捷键（Ctrl+Enter / Space / Ctrl+S）、`--danger`/`--accent` 色彩拆分、上传校验（20MB+魔数嗅探）、文本长度上限（2000 字 413）、Qwen 阶段独立 SSE 事件、mel 触顶前端提示、prompts/ LRU 容量上限 |
 
 **文件地图**：后端 [server.py](../server.py) ｜ 推理 [indextts/infer_v2.py](../indextts/infer_v2.py) ｜ 工具函数 [indextts/utils/server_helpers.py](../indextts/utils/server_helpers.py) ｜ 前端 [web/app.js](../web/app.js) / [web/style.css](../web/style.css) / [web/index.html](../web/index.html) ｜ 测试 [tests/test_server_helpers.py](../tests/test_server_helpers.py) / [tests/test_server_jobs.py](../tests/test_server_jobs.py) ｜ 归档 `archive/`（旧 UI / 旧 server / 官方 webui.py，保留可追溯）
