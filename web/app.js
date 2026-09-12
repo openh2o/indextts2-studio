@@ -1680,6 +1680,24 @@ function clearGlossaryError() {
   glError.hidden = true;
 }
 
+/* 折叠面板展开后，sticky CTA 会遮挡新展开内容的末尾（毛玻璃吸底），
+   自动把面板滚进 ops 可视区，让完整内容（如术语添加行）可见。 */
+document.querySelectorAll("details.fold").forEach((f) => {
+  f.addEventListener("toggle", () => {
+    if (!f.open) return;
+    const ops = f.closest(".ops");
+    if (!ops) return;
+    // 等两帧：details 展开先塌陷再撑高，一帧内量到的还是旧布局
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const fb = f.getBoundingClientRect();
+      // 阈值取 CTA 实际顶边（含负 margin 等偏移），比按高度推算稳
+      const ctaRect = ops.querySelector(".cta")?.getBoundingClientRect();
+      const limit = ctaRect ? ctaRect.top : ops.getBoundingClientRect().bottom;
+      if (fb.bottom > limit) ops.scrollTop += fb.bottom - limit;
+    }));
+  });
+});
+
 async function renderGlossary() {
   try {
     const g = (await (await fetch(`${API}/glossary`)).json()).glossary || {};

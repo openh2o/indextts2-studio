@@ -308,7 +308,9 @@ textarea:focus, select:focus, input:focus {
 .cta {
   position: sticky; bottom: 0; z-index: 3; margin-top: auto;
   margin-left: calc(-1 * var(--pad)); margin-right: calc(-1 * var(--pad));
-  margin-bottom: calc(-1 * var(--pad)); padding: 14px var(--pad) 17px;
+  /* 不再用负 margin 吃掉卡片底 padding：负值会让 ops 的可滚动高度
+     天生比可视区少 --pad，左栏最后一个折叠面板的底部永远差一点才能滚上来 */
+  padding: 14px var(--pad) calc(var(--pad) + 3px);
   background: color-mix(in srgb, var(--surface) 94%, transparent);
   border-top: 1px solid var(--border);
   backdrop-filter: blur(8px);
