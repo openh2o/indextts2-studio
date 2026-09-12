@@ -2027,10 +2027,10 @@ $("btnModelRestart").addEventListener("click", async () => {
   btn.textContent = old;
   await refreshModelPage();
 });
-/* 推荐配置：FP16 + S2MEL_FP16 开（几乎无损、显著提速），W2V_FP16 关（省 1GB 显存但需自测音色），
+/* 推荐配置：FP16 + S2MEL_FP16 开（几乎无损、显著提速），W2V_FP16 开（8G 卡省 ~1GB 显存），
    QWEN_FP16 开，cuDNN 自动调优关（实测负优化：BigVGAN 3.35s → 97s）；步数 25、CFG 0.7 */
 const RECOMMEND_CFG = {
-  s2mel_fp16: true, fp16: true, w2v_fp16: false, qwen_fp16: true, cudnn_benchmark: false,
+  s2mel_fp16: true, fp16: true, w2v_fp16: true, qwen_fp16: true, cudnn_benchmark: false,
   diffusion_steps: 25, inference_cfg_rate: 0.7,
 };
 $("btnPresetCfg").addEventListener("click", () => {
