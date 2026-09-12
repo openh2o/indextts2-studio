@@ -76,8 +76,8 @@ parser.add_argument("--port", type=int, default=7860)
 parser.add_argument("--host", type=str, default="127.0.0.1")
 parser.add_argument("--model_dir", type=str, default="./checkpoints")
 # 无参数启动时的默认配置与 start_server.bat / WebUI「推荐配置」保持一致：
-# FP16+S2MEL_FP16 开（几乎无损、显著提速），W2V_FP16 关（8G 卡省 1GB 但需自测音色），
-# QWEN_FP16 开（本就以 float16 加载），cuDNN 自动调优关（实测负优化），steps 25 / cfg 0.7
+# FP16+S2MEL_FP16+W2V_FP16+QWEN_FP16 全开（w2v 省 ~1GB 显存；8G 卡经实测可跑），
+# cuDNN 自动调优关（实测负优化），steps 25 / cfg 0.7
 parser.add_argument("--fp16", action="store_true", default=True)
 parser.add_argument("--no-fp16", dest="fp16", action="store_false",
                     help="Disable GPT main model FP16 (default on).")
@@ -85,7 +85,7 @@ parser.add_argument("--s2mel_fp16", action="store_true", default=True)
 parser.add_argument("--no-s2mel_fp16", dest="s2mel_fp16", action="store_false",
                     help="Disable s2mel diffusion FP16 (default on).")
 parser.add_argument("--w2v_fp16", action=argparse.BooleanOptionalAction, default=None,
-                    help="Run the w2v-bert-2.0 semantic encoder in FP16 (saves ~1GB VRAM). Default off.")
+                    help="Run the w2v-bert-2.0 semantic encoder in FP16 (saves ~1GB VRAM). Default on.")
 parser.add_argument("--qwen_fp16", action=argparse.BooleanOptionalAction, default=None,
                     help="Run the Qwen emotion model in FP16 (default on; --no-qwen_fp16 falls back to FP32).")
 parser.add_argument("--diffusion_steps", type=int, default=25)
@@ -178,7 +178,7 @@ class LazyTTS:
                             cfg_path=self.cfg_path,
                             use_fp16=self.init_kwargs.get("use_fp16", False),
                             use_s2mel_fp16=self.init_kwargs.get("use_s2mel_fp16", False),
-                            use_w2v_fp16=self.init_kwargs.get("use_w2v_fp16", False),
+                            use_w2v_fp16=self.init_kwargs.get("use_w2v_fp16", True),
                             use_qwen_fp16=self.init_kwargs.get("use_qwen_fp16", True),
                         )
                         t.normalizer = self.normalizer
@@ -227,7 +227,7 @@ class LazyTTS:
             "phase": self.phase,
             "fp16": bool(k.get("use_fp16", False)),
             "s2mel_fp16": bool(k.get("use_s2mel_fp16", False)),
-            "w2v_fp16": bool(k.get("use_w2v_fp16", False)),
+            "w2v_fp16": bool(k.get("use_w2v_fp16", True)),
             "qwen_fp16": bool(k.get("use_qwen_fp16", True)),
             "cudnn_benchmark": bool(k.get("cudnn_benchmark", False)),
             "diffusion_steps": int(k.get("diffusion_steps", 25)),
@@ -305,7 +305,7 @@ tts = LazyTTS(
     cfg_path=os.path.join(cmd_args.model_dir, "config.yaml"),
     use_fp16=cmd_args.fp16,
     use_s2mel_fp16=cmd_args.s2mel_fp16,
-    use_w2v_fp16=cmd_args.w2v_fp16 if cmd_args.w2v_fp16 is not None else False,
+    use_w2v_fp16=cmd_args.w2v_fp16 if cmd_args.w2v_fp16 is not None else True,
     use_qwen_fp16=cmd_args.qwen_fp16 if cmd_args.qwen_fp16 is not None else True,
     diffusion_steps=cmd_args.diffusion_steps,
     inference_cfg_rate=cmd_args.inference_cfg_rate,

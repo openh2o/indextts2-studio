@@ -11,8 +11,8 @@ rem  1 = on, 0 = off
 rem
 rem FP16=1          GPT main model in half precision (half VRAM, faster)
 rem S2MEL_FP16=1    s2mel diffusion in FP16 (measured ~32% faster on long text; timbre shifts slightly)
-rem W2V_FP16=0      w2v-bert semantic encoder in FP16. Saves ~1GB VRAM on 8G cards
-rem                 (the single biggest VRAM saver). Test audio quality after enabling.
+rem W2V_FP16=1      w2v-bert semantic encoder in FP16. Saves ~1GB VRAM on 8G cards
+rem                 (the single biggest VRAM saver). Test audio quality after disabling.
 rem QWEN_FP16=1     Qwen emotion model in FP16 (it already loads as float16; this is
 rem                 the status quo). Set 0 only to fall back to FP32 for debugging.
 rem CUDNN_BENCHMARK=0 bigvgan/wavenet conv auto-tune. MEASURED SLOWDOWN on this model:
@@ -25,7 +25,7 @@ rem ============================================================
 
 set FP16=1
 set S2MEL_FP16=1
-set W2V_FP16=0
+set W2V_FP16=1
 set QWEN_FP16=1
 set CUDNN_BENCHMARK=0
 set DIFFUSION_STEPS=25
