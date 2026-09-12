@@ -7,6 +7,7 @@ these re-exports; nothing here may depend on the app instance.
 import hashlib
 import os
 import re
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -180,3 +181,101 @@ def looks_like_audio(data: bytes) -> bool:
     if data[4:8] == b"ftyp":
         return True  # mp4/m4a
     return False
+
+
+# wetext / kaldifst non-ASCII path workaround -----------------------------------
+# kaldifst (C++ extension) opens .fst files via the ANSI C API: a wetext
+# package installed under a non-ASCII path (e.g. a Chinese bundle folder)
+# fails at import with "Error opening input stream". Fix: if the wetext
+# package path is not pure-ASCII, copy its fsts directory once to an
+# ASCII-safe cache and redirect importlib.resources.files for "wetext.fsts"
+# to that copy. Must run before the first `import wetext`.
+
+def _is_ascii(s):
+    try:
+        s.encode("ascii")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _writable_dir(path):
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".write_probe")
+        with open(probe, "w") as f:
+            f.write("1")
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
+def ensure_wetext_ascii_path():
+    """No-op on ASCII install paths; redirect wetext FSTs to an ASCII copy otherwise.
+
+    Returns True when a redirect was installed (non-ASCII install detected).
+    """
+    import importlib.util
+    import importlib.resources
+    import sys
+
+    pkg_dir = None
+    try:
+        spec = importlib.util.find_spec("wetext")
+        if spec is not None and spec.submodule_search_locations:
+            pkg_dir = str(list(spec.submodule_search_locations)[0])
+    except Exception:
+        return False
+    if not pkg_dir or _is_ascii(pkg_dir):
+        return False  # normal ASCII install: nothing to do
+
+    fsts_src = os.path.join(pkg_dir, "fsts")
+    if not os.path.isdir(fsts_src):
+        return False
+
+    # %TEMP% often sits under a non-ASCII username on Chinese Windows;
+    # ProgramData is the machine-wide ASCII-safe writable root.
+    candidates = [
+        os.path.join(os.environ.get("ProgramData", "C:\\ProgramData"), "IndexTTS2"),
+        tempfile.gettempdir(),
+    ]
+    cache_root = next((c for c in candidates if _is_ascii(c) and _writable_dir(c)), None)
+    if cache_root is None:
+        return False
+    fsts_dst = os.path.join(cache_root, "wetext_fsts")
+
+    import shutil
+    marker = os.path.join(cache_root, "wetext_fsts.done")
+    try:
+        if not (os.path.isdir(fsts_dst) and os.path.exists(marker)):
+            shutil.rmtree(fsts_dst, ignore_errors=True)
+            shutil.copytree(fsts_src, fsts_dst)
+            with open(marker, "w") as f:
+                f.write(fsts_src)
+    except Exception:
+        return False
+
+    # Too late to patch if wetext already imported: its constants.py loads
+    # the FSTs at module import time and would have crashed before this.
+    if "wetext" in sys.modules:
+        return False
+
+    orig_files = importlib.resources.files
+
+    class _AsciiFstsDir:
+        """Minimal importlib.resources-style dir handle wetext can joinpath()."""
+        def __init__(self, path):
+            self._path = path
+        def joinpath(self, name):
+            return _AsciiFstsDir(os.path.join(self._path, str(name)))
+        def __str__(self):
+            return self._path
+
+    def _patched_files(anchor):
+        if str(anchor) == "wetext.fsts":
+            return _AsciiFstsDir(fsts_dst)
+        return orig_files(anchor)
+
+    importlib.resources.files = _patched_files
+    return True

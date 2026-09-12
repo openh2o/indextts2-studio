@@ -63,8 +63,19 @@ from indextts.utils.server_helpers import (
     clean_legacy_prompts as _clean_legacy_prompts_impl,
     looks_like_audio as _looks_like_audio,
     cap_prompt_files as _cap_prompt_files,
+    ensure_wetext_ascii_path,
     AUDIO_MAX_BYTES,
 )
+# 中文路径分发包兼容：kaldifst 走 ANSI C API 打开 .fst，wetext 装在非 ASCII
+# 路径下 import 即炸。必须在任何 wetext 触达之前装好重定向（ASCII 路径下为空操作）。
+ensure_wetext_ascii_path()
+# 中文 Windows 控制台默认 GBK 代码页：推理链路里的 print（如 token 列表、模型路径）
+# 含 GBK 无法编码的字符时直接 UnicodeEncodeError 炸掉整次生成。统一改 UTF-8 + 替换。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 parser = argparse.ArgumentParser(
     description="IndexTTS2 FastAPI server",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
