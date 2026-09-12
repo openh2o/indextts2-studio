@@ -64,6 +64,8 @@
             <svg id="spkPlayIcon" width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
           </button>
           <span class="range" id="spkTime">0.00s / 0.00s</span>
+          <span class="ref-name" id="spkFileName" title=""></span>
+          <button class="btn ghost mini ref-change" id="spkChange" type="button">更换音频</button>
         </div>
       </div>
     </div>
@@ -201,6 +203,7 @@
       </div>
       <div class="trim-hint">在波形上按下拖动选择要保留的片段</div>
       <div class="result-actions">
+        <button class="btn ghost" id="playFromStart">从头播放</button>
         <button class="btn ghost" id="playSel">播放选中</button>
         <button class="btn ghost" id="resetSel">重置选择</button>
         <button class="btn primary" id="dlBtn">
@@ -365,6 +368,6 @@
   </div>
 </div>
 
-<script src="/assets/app.js?v=202609092"></script>
+<script src="/assets/app.js?v=20260912"></script>
 </body>
 </html>

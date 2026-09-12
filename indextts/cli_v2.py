@@ -522,8 +522,6 @@ def _run_synth(args, tts_factory=None, stdin=None):
                 cfg_path=str(model_dir / "config.yaml"),
                 model_dir=str(model_dir),
                 use_fp16=runtime.fp16,
-                use_w2v_fp16=runtime.w2v_fp16,
-                use_qwen_fp16=runtime.qwen_fp16,
                 device=runtime.device,
             )
             infer_kwargs = {
@@ -591,8 +589,6 @@ def _run_batch(args, tts_factory=None):
                 cfg_path=str(model_dir / "config.yaml"),
                 model_dir=str(model_dir),
                 use_fp16=runtime.fp16,
-                use_w2v_fp16=runtime.w2v_fp16,
-                use_qwen_fp16=runtime.qwen_fp16,
                 device=runtime.device,
             )
     except Exception as exc:

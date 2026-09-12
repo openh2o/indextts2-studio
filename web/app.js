@@ -40,6 +40,7 @@ function _modalOpen(opts) {
   _modal.input.value = opts.value || "";
   _modal.input.placeholder = opts.placeholder || "";
   _modal.okBtn.textContent = opts.okText || "确定";
+  $("modalCancel").textContent = opts.cancelText || "取消";
   _modal.okBtn.classList.toggle("primary", !opts.danger);
   _modal.prevFocus = document.activeElement;
   _modal.mask.hidden = false;
@@ -80,6 +81,243 @@ function applyTheme(t) {
   drawHeaderWave();
   if (spkBuffer) drawSpkWave();
   if (trim.buffer) drawTrimWave();
+}
+
+/* ---------------- workspace draft (survives a page refresh) ---------------- */
+const DRAFT_KEY = "studioDraft.v1";
+const DB_NAME = "index-tts-studio";
+const DB_VERSION = 1;
+const DRAFT_STORE = "draft";
+const DRAFT_AUDIO_KEYS = { spk: "spk_audio", emo: "emo_audio" };
+
+function draftClientId() {
+  let id = sessionStorage.getItem("studioClientId");
+  if (!id) {
+    id = crypto.randomUUID();
+    sessionStorage.setItem("studioClientId", id);
+  }
+  return id;
+}
+const CLIENT_ID = draftClientId();
+
+function openDraftDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(DRAFT_STORE)) db.createObjectStore(DRAFT_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbRequest(request) {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function setDraftBlob(key, blob) {
+  return openDraftDb().then((db) => {
+    const tx = db.transaction(DRAFT_STORE, "readwrite");
+    const store = tx.objectStore(DRAFT_STORE);
+    if (blob == null) store.delete(key);
+    else store.put(blob, key);
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onabort = tx.onerror = () => reject(tx.error);
+    });
+  });
+}
+
+function getDraftBlob(key) {
+  return openDraftDb().then((db) =>
+    idbRequest(db.transaction(DRAFT_STORE).objectStore(DRAFT_STORE).get(key))
+  );
+}
+
+function clearDraftBlobs() {
+  return openDraftDb().then((db) => {
+    const tx = db.transaction(DRAFT_STORE, "readwrite");
+    const store = tx.objectStore(DRAFT_STORE);
+    for (const key of Object.values(DRAFT_AUDIO_KEYS)) store.delete(key);
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onabort = tx.onerror = () => reject(tx.error);
+    });
+  });
+}
+
+function assignFile(inputEl, file) {
+  const dt = new DataTransfer();
+  dt.items.add(file);
+  inputEl.files = dt.files;
+}
+
+function readDraft() {
+  try {
+    const value = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
+    return value && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveDraft() {
+  const vec = Array.from(vecInputs(), (s) => Number(s.value));
+  const draft = {
+    version: 1,
+    text: $("text").value,
+    curPresetName,
+    libTab: curLib,
+    emoMode: $("emoMode").value,
+    emoWeight: $("emoWeight").value,
+    emoText: $("emoText").value,
+    emoRandom: $("emoRandom").checked,
+    doSample: $("doSample").checked,
+    topP: $("topP").value,
+    topK: $("topK").value,
+    temperature: $("temperature").value,
+    lenPen: $("lenPen").value,
+    numBeams: $("numBeams").value,
+    repPen: $("repPen").value,
+    maxMel: $("maxMel").value,
+    segTokens: $("segTokens").value,
+    emoVector: vec,
+    savedAt: Date.now(),
+  };
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+  } catch (e) { /* storage may be full; the active session remains usable */ }
+}
+
+function applyDraft(draft) {
+  if (!draft) return;
+  if (typeof draft.text === "string") $("text").value = draft.text;
+  if (typeof draft.curPresetName === "string") curPresetName = draft.curPresetName;
+  if (draft.emoMode != null) $("emoMode").value = String(draft.emoMode);
+  if (draft.emoWeight != null) $("emoWeight").value = draft.emoWeight;
+  if (typeof draft.emoText === "string") $("emoText").value = draft.emoText;
+  if (draft.emoRandom != null) $("emoRandom").checked = !!draft.emoRandom;
+  if (draft.doSample != null) $("doSample").checked = !!draft.doSample;
+  if (draft.topP != null) $("topP").value = draft.topP;
+  if (draft.topK != null) $("topK").value = draft.topK;
+  if (draft.temperature != null) $("temperature").value = draft.temperature;
+  if (draft.lenPen != null) $("lenPen").value = draft.lenPen;
+  if (draft.numBeams != null) $("numBeams").value = draft.numBeams;
+  if (draft.repPen != null) $("repPen").value = draft.repPen;
+  if (draft.maxMel != null) $("maxMel").value = draft.maxMel;
+  if (draft.segTokens != null) $("segTokens").value = draft.segTokens;
+  if (Array.isArray(draft.emoVector)) setVecInputs(draft.emoVector);
+  $("charCount").textContent = `${$("text").value.trim().length} 字`;
+  bindSliders();
+  emoVisible();
+  updateGenSummary();
+  scheduleSegments();
+}
+
+function draftElapsed(job) {
+  const startMs = (job.started_at || job.created_at || 0) * 1000;
+  return Math.max(0, (Date.now() - startMs) / 1000);
+}
+
+function applyJobSnapshot(job) {
+  const isNew = job.job_id !== curJobId;
+  curJobId = job.job_id || "";
+  curJobState = job.state === "stop_requested" ? "stopping"
+    : job.state === "stopping" ? "stopping"
+    : job.state === "queued" ? "queued"
+    : "running";
+  genBtn.disabled = true;
+  if (isNew) resetSteps();
+  genStart = performance.now() - draftElapsed(job) * 1000;
+  errBox.classList.remove("on");
+  showLoading(job.state === "stopping"
+    ? "正在停止生成并重新加载模型…"
+    : job.state === "queued" ? "排队中…" : transDesc(job.stage_desc) || "正在生成语音…");
+  $("pbarFill").style.width = `${Math.round((job.progress || 0) * 100)}%`;
+  $("pStageMeta").textContent = job.state === "queued" ? "排队中" : `${Math.round((job.progress || 0) * 100)}%`;
+  $("pElapsed").textContent = `${draftElapsed(job).toFixed(1)}s`;
+  startElapsed();
+  updateCancelUi();
+}
+
+let jobReconnectTimer = null;
+
+async function restoreJob() {
+  try {
+    const r = await fetch(`/jobs/current?client_id=${encodeURIComponent(CLIENT_ID)}`);
+    const j = await r.json().catch(() => ({}));
+    const job = j.job;
+    if (!job) return;
+    if (["queued", "running", "stop_requested", "stopping"].includes(job.state)) {
+      applyJobSnapshot(job);
+      clearInterval(jobReconnectTimer);
+      jobReconnectTimer = setInterval(async () => {
+        try {
+          const r2 = await fetch(`/jobs/${encodeURIComponent(curJobId)}`);
+          if (!r2.ok) throw new Error("任务状态不可用");
+          const j2 = await r2.json();
+          const s = j2.job;
+          if (!s) throw new Error("任务状态不可用");
+          if (["done", "error", "cancelled"].includes(s.state)) {
+            clearInterval(jobReconnectTimer);
+            jobReconnectTimer = null;
+            if (s.state === "done" && s.result) {
+              histCurId = s.result.history_id || "";
+              // 恢复路径与 SSE 路径对齐:先释放按钮/计时器/波形动画,再展示结果
+              stopUi();
+              await loadResult(s.result.wav, s.result.elapsed, s.result.file);
+              await refreshHistory();
+            } else if (s.state === "cancelled") {
+              showError("已取消（排队中的任务未开始生成）");
+            } else {
+              showError(s.error || "生成失败");
+            }
+            pollStatus();
+          } else {
+            applyJobSnapshot(s);
+          }
+        } catch (e) {
+          clearInterval(jobReconnectTimer);
+          jobReconnectTimer = null;
+          showError("任务状态恢复失败，请稍后在生成历史中查看");
+        }
+      }, 500);
+    } else if (job.state === "done" && job.result) {
+      histCurId = job.result.history_id || "";
+      // 与 SSE done 路径一致:先释放按钮/计时器,再展示已恢复的结果
+      stopUi();
+      await loadResult(job.result.wav, job.result.elapsed, job.result.file);
+      await refreshHistory();
+    } else if (job.state === "error") {
+      showError(job.error || "生成失败");
+    } else if (job.state === "cancelled") {
+      showError("已取消（排队中的任务未开始生成）");
+    }
+  } catch (e) { /* server restart means there is nothing to reconnect */ }
+}
+
+async function restoreDraft() {
+  applyDraft(readDraft());
+  try {
+    const [spkBlob, emoBlob] = await Promise.all([
+      getDraftBlob(DRAFT_AUDIO_KEYS.spk).catch(() => null),
+      getDraftBlob(DRAFT_AUDIO_KEYS.emo).catch(() => null),
+    ]);
+    if (spkBlob) {
+      const file = new File([spkBlob], spkBlob.name || "reference.wav", { type: spkBlob.type || "audio/wav" });
+      assignFile($("spkFile"), file);
+      setSpkFile(file, false);
+    }
+    if (emoBlob) {
+      const file = new File([emoBlob], emoBlob.name || "emotion.wav", { type: emoBlob.type || "audio/wav" });
+      assignFile($("emoFile"), file);
+      setEmoFile(file, false);
+    }
+  } catch (e) { /* audio restoration is best-effort */ }
 }
 themeBtn.addEventListener("click", () => {
   const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
@@ -184,10 +422,16 @@ async function pollStatus() {
   try {
     const s = await (await fetch("/model")).json();
     modelReady = !!s.loaded;
-    $("modelPill").dataset.s = s.loaded ? "ready" : "unloaded";
-    $("modelPillText").textContent = s.loaded
-      ? "模型已加载"
-      : (jobActive() ? "模型加载中…" : "模型未加载");
+    const phase = s.phase || (s.loaded ? "ready" : "unloaded");
+    $("modelPill").dataset.s = phase === "ready" ? "ready" : phase === "unloaded" ? "unloaded" : "loading";
+    $("modelPillText").textContent = {
+      ready: "模型已加载",
+      loading: "模型加载中…",
+      reloading: "模型重载中…",
+      unloading: "模型卸载中…",
+      error: "模型状态异常",
+      unloaded: "模型未加载",
+    }[phase] || "模型未加载";
   } catch (e) {
     $("modelPill").dataset.s = "unloaded";
     $("modelPillText").textContent = "服务连接中断…";
@@ -208,6 +452,23 @@ spkDrop.addEventListener("dragover", (e) => { e.preventDefault(); spkDrop.classL
 spkDrop.addEventListener("dragleave", () => spkDrop.classList.remove("over"));
 spkDrop.addEventListener("drop", (e) => { e.preventDefault(); spkDrop.classList.remove("over"); if (e.dataTransfer.files[0]) setSpkFile(e.dataTransfer.files[0]); });
 spkFile.addEventListener("change", () => spkFile.files[0] && setSpkFile(spkFile.files[0]));
+let draftSaveTimer = null;
+function scheduleDraftSave() {
+  clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(saveDraft, 400);
+}
+const spkPlayerBox = $("spkPlayerBox");
+spkPlayerBox.addEventListener("dragover", (e) => { e.preventDefault(); spkPlayerBox.classList.add("over"); });
+spkPlayerBox.addEventListener("dragleave", () => spkPlayerBox.classList.remove("over"));
+spkPlayerBox.addEventListener("drop", (e) => {
+  e.preventDefault();
+  spkPlayerBox.classList.remove("over");
+  if (e.dataTransfer.files[0]) setSpkFile(e.dataTransfer.files[0]);
+});
+$("spkChange").addEventListener("click", () => {
+  resetSpkSelection();
+  spkFile.click();
+});
 
 /* emo reference audio shares the same pattern */
 const emoDrop = $("emoDrop"), emoFile = $("emoFile");
@@ -215,8 +476,15 @@ emoDrop.addEventListener("dragover", (e) => { e.preventDefault(); emoDrop.classL
 emoDrop.addEventListener("dragleave", () => emoDrop.classList.remove("over"));
 emoDrop.addEventListener("drop", (e) => { e.preventDefault(); emoDrop.classList.remove("over"); if (e.dataTransfer.files[0]) setEmoFile(e.dataTransfer.files[0]); });
 emoFile.addEventListener("change", () => emoFile.files[0] && setEmoFile(emoFile.files[0]));
-function setEmoFile(f) { $("emoName").textContent = f.name; }
-function clearEmoFile() { emoFile.value = ""; $("emoName").textContent = "点击选择情感参考音频"; }
+function setEmoFile(f, persist = true) {
+  $("emoName").textContent = f.name;
+  if (persist) setDraftBlob(DRAFT_AUDIO_KEYS.emo, f).catch(() => {});
+}
+function clearEmoFile() {
+  emoFile.value = "";
+  $("emoName").textContent = "点击选择情感参考音频";
+  setDraftBlob(DRAFT_AUDIO_KEYS.emo, null).catch(() => {});
+}
 
 function drawSpkWave() {
   const { w, h } = sizeCanvas(spkWave);
@@ -291,8 +559,29 @@ function getAC() {
   return sharedAC;
 }
 
-function setSpkFile(f) {
-  $("spkName").textContent = f.name;
+function resetSpkSelection() {
+  spkAudio.pause();
+  spkPlaying = false;
+  spkSeekFrac = 0;
+  spkBuffer = null;
+  // 草稿里的音频 blob 一并清掉:否则"更换音频"后取消文件选择,
+  // 刷新页面会把旧音频从 IndexedDB 恢复回来
+  setDraftBlob(DRAFT_AUDIO_KEYS.spk, null).catch(() => {});
+  $("spkPlayerBox").hidden = true;
+  $("spkDrop").hidden = false;
+  $("spkName").textContent = "点击选择或拖入音频文件";
+  $("spkSub").textContent = "约 3~10 秒参考音频效果最佳";
+  $("spkFileName").textContent = "";
+  $("spkFileName").title = "";
+}
+
+function setSpkFile(f, persist = true) {
+  $("spkFileName").textContent = f.name;
+  $("spkFileName").title = f.name;
+  $("spkDrop").hidden = true;
+  $("spkPlayerBox").hidden = false;
+  $("spkTime").textContent = "读取中…";
+  if (persist) setDraftBlob(DRAFT_AUDIO_KEYS.spk, f).catch(() => {});
   try {
     if (spkUrl) URL.revokeObjectURL(spkUrl);
     spkUrl = URL.createObjectURL(f);
@@ -300,15 +589,10 @@ function setSpkFile(f) {
     f.arrayBuffer().then((ab) => getAC().decodeAudioData(ab)).then((buf) => {
       spkBuffer = buf;
       spkPlaying = false; spkSeekFrac = 0;
-      $("spkPlayerBox").hidden = false;
-      $("spkSub").textContent = spkBuffer.duration >= 3 && spkBuffer.duration <= 10
-        ? `时长 ${spkBuffer.duration.toFixed(1)}s`
-        : `时长 ${spkBuffer.duration.toFixed(1)}s · 建议 3~10 秒`;
+      $("spkTime").textContent = `0.00s / ${spkBuffer.duration.toFixed(2)}s`;
       spkTick();
     }).catch(() => {
-      spkBuffer = null;
-      $("spkPlayerBox").hidden = true;
-      $("spkName").textContent = "点击选择或拖入音频文件";
+      resetSpkSelection();
       $("spkSub").textContent = "不支持该音频格式，请换一个文件（wav/mp3/flac/ogg）";
     });
   } catch (e) { /* ignore */ }
@@ -359,6 +643,7 @@ function emoVisible() {
 $("emoMode").addEventListener("change", emoVisible);
 // 清空旧情感音频选择，避免从模式1切走再切回时把过期文件发上去
 $("emoMode").addEventListener("change", () => { if ($("emoMode").value != "1") clearEmoFile(); });
+$("emoMode").addEventListener("change", scheduleDraftSave);
 
 /* ---------------- sliders ---------------- */
 const SLIDERS = [
@@ -392,6 +677,7 @@ $("resetParams").addEventListener("click", () => {
   }
   bindSliders();
   scheduleSegments();
+  scheduleDraftSave();
 });
 $("segTokens").addEventListener("input", scheduleSegments);
 
@@ -450,6 +736,7 @@ function scheduleSegments() {
 $("text").addEventListener("input", () => {
   $("charCount").textContent = `${$("text").value.trim().length} 字`;
   scheduleSegments();
+  scheduleDraftSave();
 });
 
 // 文本框高度由 CSS 固定（#text 固定高 + 内部滚动），不随内容自动撑高
@@ -469,6 +756,10 @@ function updateGenSummary() {
   $(id).addEventListener("input", updateGenSummary);
   $(id).addEventListener("change", updateGenSummary);
 });
+["emoText", "emoRandom", "doSample", "topP", "topK", "temperature", "lenPen", "numBeams", "repPen", "maxMel", "segTokens", "emoWeight"].forEach((id) => {
+  $(id).addEventListener("input", scheduleDraftSave);
+  $(id).addEventListener("change", scheduleDraftSave);
+});
 
 /* ---------------- generation ---------------- */
 const genBtn = $("genBtn"), errBox = $("errBox"), cancelBtn = $("cancelBtn");
@@ -477,6 +768,7 @@ let elapsedTimer = null, genStart = 0;
 let hasResult = false;
 let curJobId = "";            // active inference job id (for cancel)
 let curAbort = null;          // AbortController for the SSE fetch
+let curJobState = "";         // queued | running | stopping
 function jobActive() { return genBtn.disabled; }
 
 function setResultVisible(visible) {
@@ -544,10 +836,27 @@ function stopUi() {
   genAnim.on = false;
   cancelBtn.hidden = true;
   curJobId = "";
+  curJobState = "";
   curAbort = null;
   drawHeaderWave(0);
 }
-function showError(msg) {
+
+function updateCancelUi() {
+  if (!curJobId) return;
+  if (curJobState === "queued") {
+    cancelBtn.textContent = "取消排队";
+    cancelBtn.disabled = false;
+  } else if (curJobState === "cancelling") {
+    cancelBtn.textContent = "正在取消…";
+    cancelBtn.disabled = true;
+  } else if (curJobState === "stopping") {
+    cancelBtn.textContent = "正在停止…";
+    cancelBtn.disabled = true;
+  } else {
+    cancelBtn.textContent = "停止生成";
+    cancelBtn.disabled = false;
+  }
+}function showError(msg) {
   errBox.textContent = msg;
   errBox.classList.add("on");
   loadingBox.hidden = true;
@@ -580,32 +889,35 @@ cancelBtn.addEventListener("click", async () => {
   const jobId = curJobId;
   cancelBtn.disabled = true;
   try {
-    const r = await fetch(`/tts/${jobId}/cancel`, { method: "POST" });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.detail || "取消失败");
-    if (j.state === "queued") {
-      // 后端会把 error 事件推进 SSE 流，正常路径收尾
-      cancelBtn.textContent = "正在取消…";
-    } else {
-      // running：无法安全中断 GPU 推理。问用户要不要放弃等待（后台跑完入历史）
-      const giveUp = await uiConfirm({
-        title: "任务运行中",
-        body: "任务已在 GPU 上运行，无法安全中断。放弃等待后，推理将在后台继续完成，完成后可在生成历史中找回。",
-        okText: "放弃等待",
+    if (curJobState === "running") {
+      const stop = await uiConfirm({
+        title: "停止生成",
+        body: "将中断当前推理并重新加载模型，本次已生成的部分不会保存。",
+        okText: "停止并重载",
+        cancelText: "继续等待",
+        danger: true,
       });
-      if (giveUp) {
-        if (curAbort) curAbort.abort();
-        loadingBox.hidden = true;
-        setResultVisible(hasResult);
-        stopUi();
-        showActionHint("已放弃等待。任务在后台继续运行，完成后会出现在生成历史里");
+      if (!stop) {
+        updateCancelUi();
+        return;
       }
     }
+    const r = await fetch(`/tts/${jobId}/stop`, { method: "POST" });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.detail || "停止失败");
+    if (j.state === "cancelled") {
+      // 排队任务已转 cancelled,worker 的终止事件马上就到(排队取消现在即时生效)
+      curJobState = "cancelling";
+    } else if (j.state === "stop_requested" || j.state === "running") {
+      curJobState = "stopping";
+      showLoading("正在停止生成并重新加载模型…");
+    }
+    updateCancelUi();
   } catch (e) {
-    showActionError("取消失败: " + e.message);
+    showActionError("停止失败: " + e.message);
+    updateCancelUi();
   } finally {
-    cancelBtn.disabled = false;
-    cancelBtn.textContent = "取消生成";
+    if (curJobState !== "stopping") updateCancelUi();
   }
 });
 
@@ -632,9 +944,11 @@ genBtn.addEventListener("click", async () => {
   $("pbarFill").style.width = "0%";
   $("pStageMeta").textContent = "";
   startElapsed();
+  saveDraft();
 
-  const fd = new FormData();
-  fd.append("spk_audio", spkSelected);
+    const fd = new FormData();
+    fd.append("client_id", CLIENT_ID);
+    fd.append("spk_audio", spkSelected);
   fd.append("text", $("text").value);
   fd.append("emo_mode", mode);
   fd.append("emo_weight", $("emoWeight").value);
@@ -676,17 +990,27 @@ genBtn.addEventListener("click", async () => {
         if (!dl) continue;
         let ev;
         try { ev = JSON.parse(dl.slice(5).trim()); } catch (e) { continue; }
-        if (ev.type === "started") {
-          curJobId = ev.job_id || "";
+    if (ev.type === "started") {
+      curJobId = ev.job_id || "";
+      curJobState = "running";
+      updateCancelUi();
         } else if (ev.type === "queue") {
+          curJobState = "queued";
+          updateCancelUi();
           showLoading(`排队中… 前面还有 ${ev.ahead} 个任务`);
           $("pStageMeta").textContent = `排队 #${ev.ahead + 1}`;
         } else if (ev.type === "load") {
+          curJobState = "running";
+          updateCancelUi();
           loadingModel = true;
           markStep(0, "running");
           showLoading("正在加载模型…首次调用需 30~60 秒");
           $("pbarFill").style.width = "8%";
         } else if (ev.type === "progress") {
+          if (curJobState === "queued") {
+            curJobState = "running";
+            updateCancelUi();
+          }
           if (loadingModel) { loadingModel = false; $("pbarFill").style.width = "0%"; }
           markStep(0, "done");
           const pStage = String(ev.desc || "").split("|")[1] || "";
@@ -715,6 +1039,10 @@ genBtn.addEventListener("click", async () => {
           pollStatus();
         } else if (ev.type === "error") {
           throw new Error(ev.detail || "生成失败");
+        } else if (ev.type === "stopping") {
+          curJobState = "stopping";
+          updateCancelUi();
+          showLoading("正在停止生成并重新加载模型…");
         }
       }
     }
@@ -847,6 +1175,17 @@ $("resetSel").addEventListener("click", () => {
   drawTrimWave();
 });
 
+$("playFromStart").addEventListener("click", () => {
+  if (!trim.buffer) return;
+  if (selStopTick) {
+    player.removeEventListener("timeupdate", selStopTick);
+    selStopTick = null;
+  }
+  player.currentTime = 0;
+  player.play();
+  bigPlayIcon.innerHTML = PAUSE2;
+});
+
 player.addEventListener("play", () => { bigPlayIcon.innerHTML = PAUSE2; });
 player.addEventListener("pause", () => { bigPlayIcon.innerHTML = PLAY2; });
 
@@ -935,6 +1274,7 @@ function applyPresetToForm(j) {
   if (j.prompt_audio_url) fetchPresetAudio(j.prompt_audio_url, $("spkFile"), setSpkFile);
   if (j.emo_audio_url) fetchPresetAudio(j.emo_audio_url, $("emoFile"), setEmoFile);
   scheduleSegments();
+  scheduleDraftSave();
 }
 function collectPresetState(fd) {
   fd.append("emo_control_method", $("emoMode").value);
@@ -976,6 +1316,7 @@ function switchLib(which) {
   $("libSearch").value = "";
   renderLib();
   $("libTools").hidden = which !== "presets"; // 搜索/刷新/保存仅预设 tab 需要
+  scheduleDraftSave();
 }
 libTabs.forEach((b) => b.addEventListener("click", () => switchLib(b.dataset.lib)));
 
@@ -989,10 +1330,10 @@ async function refreshPresets() {
 /* 预设详情统一缓存（跨 libList / preset 管理页复用，避免 N+1 重复请求） */
 const presetDetailCache = new Map();
 function presetDetail(name, force = false) {
-  if (!force && presetDetailCache.has(name)) return presetDetailCache.get(name);
+  if (!force && presetDetailCache.has(name)) return Promise.resolve(presetDetailCache.get(name));
   const p = fetch("/presets/" + encodeURIComponent(name))
     .then((r) => (r.ok ? r.json() : null))
-    .then((d) => { presetDetailCache.set(name, d); return d; })
+    .then((d) => d)
     .catch(() => null);
   presetDetailCache.set(name, p);
   return p;
@@ -1074,7 +1415,7 @@ function renderLib() {
           const dt = new DataTransfer();
           dt.items.add(file);
           $("spkFile").files = dt.files;
-          setSpkFile(file);
+          setSpkFile(file, false); // example audio already exists server-side
           $("text").value = ex.text || "";
           $("charCount").textContent = `${(ex.text || "").trim().length} 字`;
           $("emoMode").value = String(ex.emo_mode ?? 0);
@@ -1086,6 +1427,7 @@ function renderLib() {
           emoVisible();
           curPresetName = "";
           scheduleSegments();
+          scheduleDraftSave();
           showActionHint("示例已加载: " + ((ex.text || "").slice(0, 30) || fileName));
           updateGenSummary();
         } catch (err) { showActionError("加载示例失败: " + err.message); }
@@ -1454,8 +1796,13 @@ function mmElapsedTimer(label) {
 async function refreshModelPage() {
   try {
     const s = await (await fetch("/model")).json();
-    mmState.textContent = s.loaded ? "已加载" : "未加载";
-    mmState.className = "mono " + (s.loaded ? "ok" : "off");
+    const phase = s.phase || (s.loaded ? "ready" : "unloaded");
+    const stateNames = {
+      ready: "已加载", loading: "加载中", reloading: "重载中",
+      unloading: "卸载中", error: "加载失败", unloaded: "未加载",
+    };
+    mmState.textContent = stateNames[phase] || stateNames.unloaded;
+    mmState.className = "mono " + (phase === "ready" ? "ok" : phase === "unloaded" ? "off" : "");
     for (const k of CFG_KEYS) { const el = $(CFG_BOX[k]); if (el) el.checked = !!s[k]; }
     $("cfgSteps").value = s.diffusion_steps ?? 25;
     $("cfgRate").value = s.inference_cfg_rate ?? 0.7;
@@ -1511,7 +1858,15 @@ $("btnModelRestart").addEventListener("click", async () => {
   mmFlashErr("");
   const iv = mmElapsedTimer("重启中");
   try {
-    const r = await (await fetch("/model/restart", { method: "POST" })).json();
+    const body = {};
+    for (const k of CFG_KEYS) body[k] = $(CFG_BOX[k]).checked;
+    body.diffusion_steps = parseInt($("cfgSteps").value, 10);
+    body.inference_cfg_rate = parseFloat($("cfgRate").value);
+    const r = await (await fetch("/model/restart", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    })).json();
     if (!r.ok) throw new Error(r.error || "重启失败");
     pollStatus();
   } catch (e) { mmFlashErr(e.message); }
@@ -1571,10 +1926,12 @@ bindSliders();
 emoVisible();
 updateSegments();
 updateGenSummary();
-switchLib("presets");
+switchLib(readDraft()?.libTab === "examples" ? "examples" : "presets");
 (async () => {
-  await Promise.all([refreshPresets(), loadExamples()]);
-  renderLib();})();
+  await Promise.all([restoreDraft(), refreshPresets(), loadExamples()]);
+  renderLib();
+  restoreJob();
+})();
 refreshPmList();
 renderGlossary();
 /* 起始页签跟 URL hash（#gen/#presets/#model），刷新后不丢当前页 */

@@ -5,6 +5,7 @@ the main TTS model is loaded lazily on first /tts request, so the server
 boots fast and idle VRAM stays at zero.
 """
 import argparse
+import gc
 import json
 import os
 import queue
@@ -103,6 +104,17 @@ class LazyTTS:
         self.normalizer = None
         self.tokenizer = None
         self.model_version = None
+        self._phase = "unloaded"
+        self._phase_lock = threading.Lock()
+
+    @property
+    def phase(self):
+        with self._phase_lock:
+            return self._phase
+
+    def _set_phase(self, phase):
+        with self._phase_lock:
+            self._phase = phase
 
     def _ensure_light(self):
         """Build config/normalizer/tokenizer on first need (imports torch)."""
@@ -134,22 +146,28 @@ class LazyTTS:
                     self._ensure_light()
                     self._apply_backend_flags()
                     print(">> Loading IndexTTS2 main model on first use...", flush=True)
-                    from indextts.infer_v2 import IndexTTS2
-                    t = IndexTTS2(
-                        model_dir=self.model_dir,
-                        cfg_path=self.cfg_path,
-                        use_fp16=self.init_kwargs.get("use_fp16", False),
-                        use_s2mel_fp16=self.init_kwargs.get("use_s2mel_fp16", False),
-                        use_w2v_fp16=self.init_kwargs.get("use_w2v_fp16", False),
-                        use_qwen_fp16=self.init_kwargs.get("use_qwen_fp16", True),
-                    )
-                    t.normalizer = self.normalizer
-                    t.tokenizer = self.tokenizer
-                    t.diffusion_steps = self.init_kwargs.get("diffusion_steps", 25)
-                    t.inference_cfg_rate = self.init_kwargs.get("inference_cfg_rate", 0.7)
-                    self.cfg = t.cfg
-                    self._tts = t
-                    print(">> IndexTTS2 main model loaded.", flush=True)
+                    self._set_phase("loading")
+                    try:
+                        from indextts.infer_v2 import IndexTTS2
+                        t = IndexTTS2(
+                            model_dir=self.model_dir,
+                            cfg_path=self.cfg_path,
+                            use_fp16=self.init_kwargs.get("use_fp16", False),
+                            use_s2mel_fp16=self.init_kwargs.get("use_s2mel_fp16", False),
+                            use_w2v_fp16=self.init_kwargs.get("use_w2v_fp16", False),
+                            use_qwen_fp16=self.init_kwargs.get("use_qwen_fp16", True),
+                        )
+                        t.normalizer = self.normalizer
+                        t.tokenizer = self.tokenizer
+                        t.diffusion_steps = self.init_kwargs.get("diffusion_steps", 25)
+                        t.inference_cfg_rate = self.init_kwargs.get("inference_cfg_rate", 0.7)
+                        self.cfg = t.cfg
+                        self._tts = t
+                        self._set_phase("ready")
+                        print(">> IndexTTS2 main model loaded.", flush=True)
+                    except Exception:
+                        self._set_phase("error")
+                        raise
         return self._tts
 
     def infer(self, *args, **kwargs):
@@ -182,6 +200,7 @@ class LazyTTS:
         k = self.init_kwargs
         return {
             "loaded": self.loaded,
+            "phase": self.phase,
             "fp16": bool(k.get("use_fp16", False)),
             "s2mel_fp16": bool(k.get("use_s2mel_fp16", False)),
             "w2v_fp16": bool(k.get("use_w2v_fp16", False)),
@@ -213,11 +232,48 @@ class LazyTTS:
 
     def unload(self):
         """Drop the loaded TTS model. Only call while no inference is running."""
+        old = self._tts
+        self._set_phase("unloading")
         self._tts = None
+        if old is not None:
+            old.cache_spk_cond = None
+            old.cache_s2mel_style = None
+            old.cache_s2mel_prompt = None
+            old.cache_spk_audio_prompt = None
+            old.cache_mel = None
+            old.cache_emo_cond = None
+            old.cache_emo_audio_prompt = None
+        self._release_memory()
+        self._set_phase("unloaded")
 
     def rebuild(self):
+        # A rebuild must release the old instance before constructing the new
+        # one, otherwise both models briefly coexist and can OOM 8GB GPUs.
+        old = self._tts
+        self._set_phase("reloading")
         self._tts = None
+        if old is not None:
+            old.cache_spk_cond = None
+            old.cache_s2mel_style = None
+            old.cache_s2mel_prompt = None
+            old.cache_spk_audio_prompt = None
+            old.cache_mel = None
+            old.cache_emo_cond = None
+            old.cache_emo_audio_prompt = None
+        self._release_memory()
+        del old
         return self.ensure_loaded()
+
+    @staticmethod
+    def _release_memory():
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            pass
 
 
 tts = LazyTTS(
@@ -433,7 +489,15 @@ def model_unload():
 
 
 @app.post("/model/restart")
-def model_restart():
+def model_restart(req: dict | None = Body(None)):
+    """Apply the page config (when supplied), then rebuild the model."""
+    if req:
+        unknown = [k for k in req if k not in _MODEL_CONFIG_KEYS]
+        if unknown:
+            raise HTTPException(400, f"Unknown config keys: {', '.join(sorted(unknown))}")
+        with _INFER_LOCK:
+            for key, val in req.items():
+                tts.set_runtime(**{key: val})
     cfg = json.dumps(tts.state(), ensure_ascii=False)
     with _INFER_LOCK:
         try:
@@ -453,19 +517,82 @@ _INFER_LOCK = threading.Lock()
 
 
 # 推理任务注册表:让"排队中的任务"可被取消。已在 GPU 上运行的任务不强行中断
-# —— 跨线程打断 forward 会破坏共享模型状态;运行中取消只是客户端放弃等待,
-# 推理在后台继续跑完并计入历史,用户可回头找回结果。
+# —— 在进度回调处请求停止,随后卸载并重建模型,避免半途模型留下脏状态。
 _JOBS_LOCK = threading.Lock()
-_JOBS = {}  # job_id -> {"state": "queued" | "running" | "cancelled"}
+_JOBS = {}  # job_id -> {"state": ..., "stop_event": threading.Event}
+JOB_RETENTION_SECONDS = 300
 
 
-def _register_job():
+class _InferenceStop(Exception):
+    """Raised inside the inference progress callback after a stop request."""
+
+
+def _job_public(job, now=None):
+    """Return a JSON-safe snapshot; call with the jobs lock held."""
+    data = {k: v for k, v in job.items() if k not in ("stop_event", "events")}
+    if data.get("result") and data.get("state") in ("done", "error"):
+        now = now or time.time()
+        if now - data["finished_at"] >= JOB_RETENTION_SECONDS:
+            return None
+    return data
+
+
+def _prune_finished_jobs():
+    """Drop terminal snapshots older than the retention window."""
+    now = time.time()
+    stale = [
+        job_id for job_id, job in _JOBS.items()
+        if job.get("state") in ("done", "error") and now - job.get("finished_at", 0) >= JOB_RETENTION_SECONDS
+    ]
+    for job_id in stale:
+        _JOBS.pop(job_id, None)
+
+
+def _register_job(client_id):
     """Register a queued inference job; returns (job_id, jobs_ahead)."""
     job_id = uuid.uuid4().hex[:12]
     with _JOBS_LOCK:
+        _prune_finished_jobs()
         ahead = sum(1 for j in _JOBS.values() if j["state"] == "queued")
-        _JOBS[job_id] = {"state": "queued"}
+        _JOBS[job_id] = {
+            "job_id": job_id,
+            "client_id": client_id,
+            "state": "queued",
+            "stop_event": threading.Event(),
+            "created_at": time.time(),
+            "started_at": None,
+            "finished_at": None,
+            "progress": 0.0,
+            "stage_desc": "queued",
+        }
     return job_id, ahead
+
+
+@app.get("/jobs/current")
+def jobs_current(client_id: str = ""):
+    """Return the newest job belonging to one browser tab."""
+    if not client_id:
+        raise HTTPException(400, "client_id is required")
+    with _JOBS_LOCK:
+        _prune_finished_jobs()
+        candidates = [
+            job for job_id, job in _JOBS.items()
+            if job.get("client_id") == client_id
+        ]
+        job = max(candidates, key=lambda j: j.get("created_at", 0), default=None)
+        data = _job_public(job) if job is not None else None
+    return {"ok": True, "job": data}
+
+
+@app.get("/jobs/{job_id}")
+def jobs_detail(job_id: str):
+    with _JOBS_LOCK:
+        _prune_finished_jobs()
+        job = _JOBS.get(job_id)
+        data = _job_public(job) if job is not None else None
+    if data is None:
+        raise HTTPException(404, "Job not found or expired")
+    return {"ok": True, "job": data}
 
 
 @app.post("/tts/{job_id}/cancel")
@@ -483,12 +610,35 @@ def tts_cancel(job_id: str):
         state = job["state"]
         if state == "queued":
             job["state"] = "cancelled"
+            state = "cancelled"
     return {"ok": True, "state": state}
 
+
+@app.post("/tts/{job_id}/stop")
+def tts_stop(job_id: str):
+    """Stop a queued or running job.
+
+    queued  -> skipped before the GPU is touched;
+    running -> stops at the next progress callback, then rebuilds the model.
+    """
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(404, "Job not found or already finished")
+        state = job["state"]
+        if state == "queued":
+            job["state"] = "cancelled"
+            state = "cancelled"
+        elif state == "running":
+            job["state"] = "stop_requested"
+            job["stop_event"].set()
+            state = "stop_requested"
+    return {"ok": True, "state": state}
 
 @app.post("/tts")
 def do_tts(
     text: str = Form(...),
+    client_id: str = Form(""),
     spk_audio: UploadFile = File(...),
     emo_mode: str = Form("0"),          # 0 same-as-speaker, 1 ref-audio, 2 vector, 3 emo-text
     emo_audio: UploadFile | None = File(None),
@@ -564,32 +714,104 @@ def do_tts(
     out_path = _output_name(text, file_naming)
     t0 = time.time()
     progress_q = queue.Queue()
-    job_id, jobs_ahead = _register_job()
+    job_id, jobs_ahead = _register_job(client_id)
+    with _JOBS_LOCK:
+        stop_event = _JOBS[job_id]["stop_event"]
+
+    def record_event(ev):
+        progress_q.put(ev)
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id)
+            if job is None:
+                return
+            if ev["type"] == "queue":
+                job["stage_desc"] = "排队中"
+            elif ev["type"] == "load":
+                job["progress"] = 0.08
+                job["stage_desc"] = "正在加载模型…"
+            elif ev["type"] == "progress":
+                job["progress"] = float(ev.get("value") or 0.0)
+                job["stage_desc"] = ev.get("desc") or "正在生成语音…"
+            elif ev["type"] == "stopping":
+                job["state"] = "stopping"
+                job["stage_desc"] = "正在停止生成并重新加载模型…"
+            elif ev["type"] == "done":
+                job["state"] = "done"
+                job["finished_at"] = time.time()
+                job["stage_desc"] = "生成完成"
+                job["result"] = {
+                    "wav": ev.get("wav"),
+                    "file": ev.get("file"),
+                    "elapsed": ev.get("elapsed"),
+                    "history_id": ev.get("history_id"),
+                }
+            elif ev["type"] == "error":
+                job["state"] = "error"
+                job["finished_at"] = time.time()
+                job["error"] = ev.get("detail") or "生成失败"
+                job["stage_desc"] = "生成失败"
 
     def run_infer():
-        progress_q.put({"type": "started", "job_id": job_id})
-        if not tts.loaded:
-            progress_q.put({"type": "load", "value": 0.0, "desc": "model loading..."})
-        if jobs_ahead > 0:
-            progress_q.put({"type": "queue", "ahead": jobs_ahead})
-        with _INFER_LOCK:
-            # queued 阶段被取消:任务从没碰过 GPU,直接短路,不浪费算力
-            with _JOBS_LOCK:
-                job = _JOBS.get(job_id)
-                if job is not None and job["state"] == "cancelled":
-                    progress_q.put({"type": "error", "detail": "已取消（排队中的任务未开始生成）"})
+        try:
+            record_event({"type": "started", "job_id": job_id})
+            if not tts.loaded:
+                record_event({"type": "load", "value": 0.0, "desc": "model loading..."})
+            if jobs_ahead > 0:
+                record_event({"type": "queue", "ahead": jobs_ahead})
+            # 排队等锁期间周期性检查取消标志:被取消的排队任务立即短路,
+            # 不必等队首推理跑完才被确认(长文本任务可能耗时数分钟)
+            while not _INFER_LOCK.acquire(timeout=0.5):
+                with _JOBS_LOCK:
+                    job = _JOBS.get(job_id)
+                    skip = job is not None and job["state"] in ("cancelled", "stop_requested")
+                # record_event 内部也要拿 _JOBS_LOCK(不可重入),必须在锁外调用
+                if skip:
+                    record_event({"type": "error", "detail": "已取消（排队中的任务未开始生成）"})
                     return
-                if job is not None:
-                    job["state"] = "running"
-            _run_infer_locked()
+            try:
+                # queued 阶段被取消:任务从没碰过 GPU,直接短路,不浪费算力。
+                # 锁内只置标志、事件上报放到锁外,否则 record_event 会在锁内
+                # 再拿同一把不可重入的 _JOBS_LOCK,直接死锁并卡住后续所有请求
+                short_circuit = None
+                with _JOBS_LOCK:
+                    job = _JOBS.get(job_id)
+                    if job is not None:
+                        if job["state"] == "cancelled":
+                            short_circuit = "已取消（排队中的任务未开始生成）"
+                        elif job["state"] == "stop_requested":
+                            short_circuit = "已停止生成（任务未开始推理）"
+                        else:
+                            job["state"] = "running"
+                            job["started_at"] = time.time()
+                if short_circuit is not None:
+                    record_event({"type": "error", "detail": short_circuit})
+                    return
+                _run_infer_locked()
+            finally:
+                _INFER_LOCK.release()
+        except Exception as e:
+            traceback.print_exc()
+            # 兜底:任何未捕获异常都必须以终止事件收尾,否则 SSE 会永久挂起
+            try:
+                record_event({"type": "error", "detail": f"Inference failed: {e}"})
+            except Exception:
+                progress_q.put({"type": "error", "detail": "Inference failed"})
 
     def _run_infer_locked():
-        model = tts.ensure_loaded()
-        prev_progress = model.gr_progress
-        model.gr_progress = lambda v, desc="": progress_q.put(
-            {"type": "progress", "value": round(float(v), 4), "desc": desc}
-        )
+        model = None
+        prev_progress = None
+
+        def report_progress(v, desc=""):
+            if stop_event.is_set():
+                raise _InferenceStop()
+            record_event({"type": "progress", "value": round(float(v), 4), "desc": desc})
+
         try:
+            # 模型加载失败必须落到下面的 except:若 ensure_loaded() 在 try 外抛出,
+            # worker 会直接退出而不发终止事件,SSE 永久挂起,任务卡在 running
+            model = tts.ensure_loaded()
+            prev_progress = model.gr_progress
+            model.gr_progress = report_progress
             result = model.infer(
                 spk_audio_prompt=spk_path,
                 text=text,
@@ -612,25 +834,43 @@ def do_tts(
                 max_mel_tokens=max_mel_tokens,
             )
             if result is None or not os.path.exists(out_path):
-                progress_q.put({"type": "error", "detail": "Inference produced no output"})
+                record_event({"type": "error", "detail": "Inference produced no output"})
             else:
                 elapsed = round(time.time() - t0, 2)
                 wav_name = Path(out_path).name
                 entry = _history_add(wav_name, text, elapsed, mode)
-                progress_q.put({
+                record_event({
                     "type": "done",
                     "wav": f"/audio/{wav_name}",
                     "file": wav_name,
                     "elapsed": elapsed,
                     "history_id": entry["id"],
                 })
+        except _InferenceStop:
+            record_event({"type": "stopping", "detail": "正在停止生成并重新加载模型…"})
+            # Unwind the local model reference first so CUDA memory can be released.
+            model.gr_progress = prev_progress
+            model = None
+            try:
+                tts.rebuild()
+                gc.collect()
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                detail = "已停止生成，模型已重新加载"
+            except Exception as e:
+                traceback.print_exc()
+                detail = f"已停止生成，模型重新加载失败，下次生成将自动加载: {e}"
+            record_event({"type": "error", "detail": detail})
         except Exception as e:
             traceback.print_exc()
-            progress_q.put({"type": "error", "detail": f"Inference failed: {e}"})
+            record_event({"type": "error", "detail": f"Inference failed: {e}"})
         finally:
-            model.gr_progress = prev_progress
-            with _JOBS_LOCK:
-                _JOBS.pop(job_id, None)
+            if model is not None:
+                model.gr_progress = prev_progress
 
     threading.Thread(target=run_infer, daemon=True).start()
 

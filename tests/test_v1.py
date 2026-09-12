@@ -20,6 +20,14 @@ def tts_model():
     if not CONFIG_PATH.exists():
         pytest.skip(f"Checkpoints not found at {CHECKPOINTS_DIR}")
 
+    # V1 模型与 v2.0 配置互不兼容:v2.0 的 config.yaml 多出 emo_condition_module
+    # 等字段,V1 的 UnifiedVoice 构造函数不认,会在加载阶段直接 TypeError。
+    # 仅当本地 checkpoint 真的是 V1 时才跑这组测试。
+    from omegaconf import OmegaConf
+    version = getattr(OmegaConf.load(str(CONFIG_PATH)), "version", None)
+    if version is not None and float(version) >= 2:
+        pytest.skip(f"V1 tests require a v1 checkpoint; local config is version {version}")
+
     from indextts.infer import IndexTTS
     return IndexTTS(
         cfg_path=str(CONFIG_PATH),

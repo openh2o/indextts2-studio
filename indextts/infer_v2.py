@@ -392,6 +392,7 @@ class IndexTTS2:
             except IndexError:
                 return None
 
+    @torch.no_grad()
     def infer_generator(self, spk_audio_prompt, text, output_path,
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
