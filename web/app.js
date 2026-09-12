@@ -1439,7 +1439,7 @@ function renderLib() {
       presetDetail(name).then((d) => {
         if (!d) { meta.textContent = "-"; return; }
         const adv = d.advanced_params || {};
-        meta.textContent = `${["同参考", "情感音频", "向量", "文本"][d.emo_control_method] ?? "-"} · ${d.prompt_audio ? "含音频" : "无音频"} · temp ${adv.temperature ?? "-"}`;
+        meta.textContent = `${["同参考", "情感音频", "向量", "文本"][d.emo_control_method] ?? "-"} · ${d.prompt_audio_url ? "含音频" : "无音频"} · temp ${adv.temperature ?? "-"}`;
       });
       row.addEventListener("click", async (e) => {
         if (e.target.closest(".pm-del") || e.target.closest(".pm-act")) return;
@@ -1837,7 +1837,7 @@ async function renderPmCards() {
     pmLoadDetail(name).then((d) => {
       if (!d) { m1.textContent = "详情加载失败"; return; }
       const adv = d.advanced_params || {};
-      m1.textContent = `${EMO_MODE_NAMES[d.emo_control_method] ?? d.emo_control_method} · ${d.prompt_audio ? "含音频" : "无音频"} · temp ${adv.temperature ?? "-"}`;
+      m1.textContent = `${EMO_MODE_NAMES[d.emo_control_method] ?? d.emo_control_method} · ${d.prompt_audio_url ? "含音频" : "无音频"} · temp ${adv.temperature ?? "-"}`;
     });
     // click card → apply preset (jump to gen page)
     card.addEventListener("click", async (e) => {

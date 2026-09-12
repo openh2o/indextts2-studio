@@ -323,16 +323,20 @@ tts = LazyTTS(
     cudnn_benchmark=cmd_args.cudnn_benchmark,
 )
 
-os.makedirs("outputs", exist_ok=True)
-os.makedirs("prompts", exist_ok=True)
+# 全部数据目录锚定到 server.py 所在的项目根，与 presets（_project_root）一致；
+# 不用 CWD 相对路径，避免从别的目录启动 `python server.py` 时文件落错位置
+OUTPUTS_DIR = os.path.join(current_dir, "outputs")
+PROMPTS_DIR = os.path.join(current_dir, "prompts")
+os.makedirs(OUTPUTS_DIR, exist_ok=True)
+os.makedirs(PROMPTS_DIR, exist_ok=True)
 
 
 def _prompt_file(kind: str, data: bytes) -> str:
-    return _prompt_file_impl("prompts", kind, data)
+    return _prompt_file_impl(PROMPTS_DIR, kind, data)
 
 
 def _clean_legacy_prompts():
-    _clean_legacy_prompts_impl("prompts")
+    _clean_legacy_prompts_impl(PROMPTS_DIR)
 
 
 _clean_legacy_prompts()
@@ -364,7 +368,6 @@ def _validate_audio_upload(data: bytes, label: str) -> None:
 # 旧文件全成孤儿，目录会无限膨胀（实测曾积到 489 个 / 207MB）。启动时按
 # mtime 清掉超过保留天数的孤儿 wav；预设目录(outputs/presets)一并保护。
 OUTPUTS_RETENTION_DAYS = 14
-OUTPUTS_DIR = "outputs"
 
 
 def _clean_stale_outputs(retention_days: int = OUTPUTS_RETENTION_DAYS) -> int:
@@ -419,7 +422,11 @@ GPU_INFO = None
 _gpu_name = _nvidia_smi("name")
 if _gpu_name:
     _vram_total = _nvidia_smi("memory.total")
-    GPU_INFO = {"name": _gpu_name, "vram_total_mb": int(_vram_total) if _vram_total else None}
+    try:
+        _vram_total_mb = int(_vram_total) if _vram_total else None
+    except ValueError:
+        _vram_total_mb = None  # nvidia-smi 偶发返回 "N/A" 之类，不能让服务起不来
+    GPU_INFO = {"name": _gpu_name, "vram_total_mb": _vram_total_mb}
 
 # nvidia-smi spawns a subprocess per call (~50-200ms on Windows); multiple
 # tabs polling /metrics every 2s must not fork a storm of them. Cache for 1s.
@@ -634,7 +641,7 @@ class _InferenceStop(Exception):
 def _job_public(job, now=None):
     """Return a JSON-safe snapshot; call with the jobs lock held."""
     data = {k: v for k, v in job.items() if k not in ("stop_event", "events")}
-    if data.get("result") and data.get("state") in ("done", "error"):
+    if data.get("state") in ("done", "error", "cancelled") and data.get("finished_at"):
         now = now or time.time()
         if now - data["finished_at"] >= JOB_RETENTION_SECONDS:
             return None
@@ -646,7 +653,8 @@ def _prune_finished_jobs():
     now = time.time()
     stale = [
         job_id for job_id, job in _JOBS.items()
-        if job.get("state") in ("done", "error") and now - job.get("finished_at", 0) >= JOB_RETENTION_SECONDS
+        if job.get("state") in ("done", "error", "cancelled")
+        and now - job.get("finished_at", 0) >= JOB_RETENTION_SECONDS
     ]
     for job_id in stale:
         _JOBS.pop(job_id, None)
@@ -796,7 +804,7 @@ def do_tts(
         else:
             with open(spk_path, "wb") as f:
                 f.write(spk_data)
-            _cap_prompt_files("prompts")
+            _cap_prompt_files(PROMPTS_DIR)
     except Exception as e:
         raise HTTPException(400, f"Failed to save speaker audio: {e}")
 
@@ -814,7 +822,7 @@ def do_tts(
             else:
                 with open(emo_ref_path, "wb") as f:
                     f.write(emo_data)
-                _cap_prompt_files("prompts")
+                _cap_prompt_files(PROMPTS_DIR)
         except Exception as e:
             raise HTTPException(400, f"Failed to save emo audio: {e}")
 
@@ -834,8 +842,8 @@ def do_tts(
     if emo_text == "":
         emo_text = None
 
-    out_path = _output_name(text, file_naming)
     t0 = time.time()
+    out_path = None  # 在拿到推理锁后由 run_infer 计算（见下）
     progress_q = queue.Queue()
     job_id, jobs_ahead = _register_job(client_id)
     with _JOBS_LOCK:
@@ -870,10 +878,15 @@ def do_tts(
                     "mel_capped": ev.get("mel_capped", False),
                 }
             elif ev["type"] == "error":
-                job["state"] = "error"
-                job["finished_at"] = time.time()
                 job["error"] = ev.get("detail") or "生成失败"
-                job["stage_desc"] = "生成失败"
+                job["finished_at"] = time.time()
+                if job["state"] in ("cancelled", "stop_requested"):
+                    # 取消/停止路径也用 error 事件收尾（前端靠它终止 SSE），
+                    # 但状态保留 cancelled，别把用户主动取消显示成“生成失败”
+                    job["stage_desc"] = "已取消"
+                else:
+                    job["state"] = "error"
+                    job["stage_desc"] = "生成失败"
 
     def run_infer():
         try:
@@ -910,6 +923,10 @@ def do_tts(
                 if short_circuit is not None:
                     record_event({"type": "error", "detail": short_circuit})
                     return
+                # 输出路径必须在拿到推理锁之后再定：unique_path 只查当时是否
+                # 存在，若在排队前计算，同标题的并发任务会拿到同一路径互相覆盖
+                nonlocal out_path
+                out_path = _output_name(text, file_naming, OUTPUTS_DIR)
                 _run_infer_locked()
             finally:
                 _INFER_LOCK.release()
@@ -1017,7 +1034,7 @@ def do_tts(
 
 @api.get("/audio/{name}")
 def audio(name: str):
-    path = os.path.join("outputs", os.path.basename(name))
+    path = os.path.join(OUTPUTS_DIR, os.path.basename(name))
     if not os.path.exists(path):
         raise HTTPException(404, "Not found")
     return FileResponse(path, media_type="audio/wav")
@@ -1040,7 +1057,7 @@ def _history_trim():
         if not _history_auto_clean:
             continue
         try:
-            os.remove(os.path.join("outputs", os.path.basename(old["file"])))
+            os.remove(os.path.join(OUTPUTS_DIR, os.path.basename(old["file"])))
         except OSError:
             pass
 
@@ -1048,7 +1065,7 @@ def _history_trim():
 def _history_add(file_name: str, text: str, elapsed: float, emo_mode: int) -> dict:
     """Record one successful generation and return the new entry."""
     try:
-        size = os.path.getsize(os.path.join("outputs", file_name))
+        size = os.path.getsize(os.path.join(OUTPUTS_DIR, file_name))
     except OSError:
         size = 0
     entry = {
@@ -1091,7 +1108,7 @@ def history_clear():
     if _history_auto_clean:
         for e in list(_history):
             try:
-                os.remove(os.path.join("outputs", os.path.basename(e["file"])))
+                os.remove(os.path.join(OUTPUTS_DIR, os.path.basename(e["file"])))
             except OSError:
                 pass
     _history.clear()
@@ -1100,20 +1117,19 @@ def history_clear():
 
 @api.delete("/history/{item_id}")
 def history_remove(item_id: str):
-    global _history
     hit = None
-    rest = []
     for e in _history:
-        if hit is None and e["id"] == item_id:
+        if e["id"] == item_id:
             hit = e
-        else:
-            rest.append(e)
+            break
     if hit is None:
         raise HTTPException(404, "History entry not found")
-    _history = rest
+    # 原地删除：_history 是全局单例，推理线程会向它 insert；此处一旦重绑定
+    # 新列表，并发插入会落到被丢弃的旧列表上（条目和自动清理都丢）。
+    _history.remove(hit)
     if _history_auto_clean:
         try:
-            os.remove(os.path.join("outputs", os.path.basename(hit["file"])))
+            os.remove(os.path.join(OUTPUTS_DIR, os.path.basename(hit["file"])))
         except OSError:
             pass
     return JSONResponse({"ok": True, "count": len(_history)})
@@ -1184,13 +1200,13 @@ def presets_create(
         if prompt_audio is not None:
             prompt_data = prompt_audio.file.read()
             _validate_audio_upload(prompt_data, "预设音色音频")
-            prompt_tmp = os.path.join("prompts", f"preset_prompt_{uuid.uuid4().hex}.wav")
+            prompt_tmp = os.path.join(PROMPTS_DIR, f"preset_prompt_{uuid.uuid4().hex}.wav")
             with open(prompt_tmp, "wb") as f:
                 f.write(prompt_data)
         if emo_audio is not None:
             emo_data = emo_audio.file.read()
             _validate_audio_upload(emo_data, "预设情感音频")
-            emo_tmp = os.path.join("prompts", f"preset_emo_{uuid.uuid4().hex}.wav")
+            emo_tmp = os.path.join(PROMPTS_DIR, f"preset_emo_{uuid.uuid4().hex}.wav")
             with open(emo_tmp, "wb") as f:
                 f.write(emo_data)
         save_preset(name, data, prompt_audio=prompt_tmp, emo_audio=emo_tmp)
@@ -1211,10 +1227,14 @@ def presets_detail(name: str):
     data = load_preset(name)
     if data is None:
         raise HTTPException(404, "Preset not found")
+    # load_preset 把音频字段转成了服务器绝对路径，只对内使用；
+    # 响应里换成语 URL，避免把服务器目录结构暴露给客户端
     if data.get("prompt_audio"):
         data["prompt_audio_url"] = f"{API_V1}/presets/{quote(name)}/audio/prompt"
     if data.get("emo_audio"):
         data["emo_audio_url"] = f"{API_V1}/presets/{quote(name)}/audio/emo_ref"
+    data.pop("prompt_audio", None)
+    data.pop("emo_audio", None)
     return JSONResponse(data)
 
 
@@ -1337,6 +1357,7 @@ def glossary_add(
     reading_zh: str = Form(""),
     reading_en: str = Form(""),
 ):
+    tts._ensure_light()  # 懒加载：首次请求可能是本端点，normalizer 此时还是 None
     term = _fix_mojibake(term).strip()
     reading_zh = _fix_mojibake(reading_zh).strip()
     reading_en = _fix_mojibake(reading_en).strip()
@@ -1362,6 +1383,7 @@ def glossary_add(
 
 @api.delete("/glossary")
 def glossary_clear():
+    tts._ensure_light()
     tts.normalizer.term_glossary.clear()
     try:
         tts.normalizer.save_glossary_to_yaml(tts.glossary_path)

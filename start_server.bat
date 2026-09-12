@@ -32,10 +32,11 @@ set DIFFUSION_STEPS=25
 set CFG_RATE=0.7
 
 rem Build the server args from the config above
-set SRV_ARGS=--port 7860
-if "%FP16%"=="1" set SRV_ARGS=%SRV_ARGS% --fp16
-if "%S2MEL_FP16%"=="1" set SRV_ARGS=%SRV_ARGS% --s2mel_fp16
-if "%W2V_FP16%"=="1" set SRV_ARGS=%SRV_ARGS% --w2v_fp16
+set PORT=7860
+set SRV_ARGS=--port %PORT%
+if "%FP16%"=="1" (set SRV_ARGS=%SRV_ARGS% --fp16) else if "%FP16%"=="0" set SRV_ARGS=%SRV_ARGS% --no-fp16
+if "%S2MEL_FP16%"=="1" (set SRV_ARGS=%SRV_ARGS% --s2mel_fp16) else if "%S2MEL_FP16%"=="0" set SRV_ARGS=%SRV_ARGS% --no-s2mel_fp16
+if "%W2V_FP16%"=="1" (set SRV_ARGS=%SRV_ARGS% --w2v_fp16) else if "%W2V_FP16%"=="0" set SRV_ARGS=%SRV_ARGS% --no-w2v_fp16
 if "%QWEN_FP16%"=="0" set SRV_ARGS=%SRV_ARGS% --no-qwen_fp16
 if "%CUDNN_BENCHMARK%"=="1" set SRV_ARGS=%SRV_ARGS% --cudnn_benchmark
 set SRV_ARGS=%SRV_ARGS% --diffusion_steps %DIFFUSION_STEPS% --inference_cfg_rate %CFG_RATE%
@@ -43,15 +44,15 @@ set SRV_ARGS=%SRV_ARGS% --diffusion_steps %DIFFUSION_STEPS% --inference_cfg_rate
 echo ============================================
 echo  IndexTTS2 FastAPI server (background)
 echo  Log:  %LOG%
-echo  UI:   http://127.0.0.1:7860
+echo  UI:   http://127.0.0.1:%PORT%
 echo  Config:
 echo    FP16=%FP16%  S2MEL_FP16=%S2MEL_FP16%  W2V_FP16=%W2V_FP16%  QWEN_FP16=%QWEN_FP16%  CUDNN_BENCHMARK=%CUDNN_BENCHMARK%
 echo    DIFFUSION_STEPS=%DIFFUSION_STEPS%  CFG_RATE=%CFG_RATE%
 echo ============================================
 echo.
 
-rem Stop any old server instance on port 7860 so the fresh code + config take effect
-powershell -NoProfile -Command "$c = Get-NetTCPConnection -LocalPort 7860 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { $p = $c.OwningProcess; Write-Host ('Old server detected (pid ' + $p + '). Stopping...'); Stop-Process -Id $p -Force; Start-Sleep -Seconds 1 }"
+rem Stop any old server instance on the target port so the fresh code + config take effect
+powershell -NoProfile -Command "$c = Get-NetTCPConnection -LocalPort %PORT% -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { $p = $c.OwningProcess; Write-Host ('Old server detected (pid ' + $p + '). Stopping...'); Stop-Process -Id $p -Force; Start-Sleep -Seconds 1 }"
 
 if exist "%LOG%" del /q "%LOG%"
 
@@ -59,16 +60,16 @@ start "IndexTTS2-server" /min cmd /c "uv run --extra server --no-sync python ser
 
 echo Waiting for server to listen...
 for /l %%i in (1,1,60) do (
-  >nul 2>&1 powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort 7860 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
+  >nul 2>&1 powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort %PORT% -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
   if not errorlevel 1 goto :ready
   ping -n 2 127.0.0.1 >nul
 )
-echo Server did not start within ~60s. Check %LOG%
+echo Server did not start within ~120s. Check %LOG%
 goto :end
 
 :ready
-echo Server is ready: http://127.0.0.1:7860
-start "" http://127.0.0.1:7860
+echo Server is ready: http://127.0.0.1:%PORT%
+start "" http://127.0.0.1:%PORT%
 
 :end
 echo.

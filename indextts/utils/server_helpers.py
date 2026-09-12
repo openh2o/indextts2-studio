@@ -108,11 +108,23 @@ def prompt_file(prompts_dir: str, kind: str, data: bytes) -> str:
 
 
 def clean_legacy_prompts(prompts_dir: str) -> None:
-    """Remove old random-uuid prompt files; keep content-hash files for reuse."""
+    """Remove old random-uuid prompt files; keep content-hash files for reuse.
+
+    preset_prompt_*/preset_emo_* are per-request upload staging files removed
+    in a finally block; only a mid-request crash can leave them behind, and
+    this runs at startup when nothing is in flight, so they are always safe
+    to delete.
+    """
     for name in os.listdir(prompts_dir):
         if not name.endswith(".wav"):
             continue
         path = os.path.join(prompts_dir, name)
+        if name.startswith(("preset_prompt_", "preset_emo_")):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            continue
         kind, _, rest = name.partition("_")
         stem = rest[:-4] if rest.endswith(".wav") else rest
         try:
