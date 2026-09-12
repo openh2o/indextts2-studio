@@ -37,7 +37,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 sys.path.append(current_dir)
 sys.path.append(os.path.join(current_dir, "indextts"))
 
-from fastapi import APIRouter, Body, FastAPI, File, Form, Response, UploadFile, HTTPException
+from fastapi import APIRouter, Body, FastAPI, File, Form, Request, Response, UploadFile, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from omegaconf import OmegaConf
 from urllib.parse import quote
@@ -949,7 +949,7 @@ def do_tts(
                 mel_capped = bool(getattr(model, "mel_tokens_capped", False))
                 record_event({
                     "type": "done",
-                    "wav": f"/audio/{wav_name}",
+                    "wav": f"{API_V1}/audio/{wav_name}",
                     "file": wav_name,
                     "elapsed": elapsed,
                     "history_id": entry["id"],
@@ -1036,7 +1036,7 @@ def _history_add(file_name: str, text: str, elapsed: float, emo_mode: int) -> di
     entry = {
         "id": uuid.uuid4().hex[:8],
         "file": file_name,
-        "url": f"/audio/{file_name}",
+        "url": f"{API_V1}/audio/{file_name}",
         "text": _safe_title(text, 60),
         "chars": len(str(text or "")),
         "elapsed": round(float(elapsed), 2),
@@ -1194,9 +1194,9 @@ def presets_detail(name: str):
     if data is None:
         raise HTTPException(404, "Preset not found")
     if data.get("prompt_audio"):
-        data["prompt_audio_url"] = f"/presets/{quote(name)}/audio/prompt"
+        data["prompt_audio_url"] = f"{API_V1}/presets/{quote(name)}/audio/prompt"
     if data.get("emo_audio"):
-        data["emo_audio_url"] = f"/presets/{quote(name)}/audio/emo_ref"
+        data["emo_audio_url"] = f"{API_V1}/presets/{quote(name)}/audio/emo_ref"
     return JSONResponse(data)
 
 
@@ -1373,10 +1373,16 @@ _legacy_json_routes = (
 
 
 def _register_legacy_redirects():
-    """307-redirect legacy root-level JSON paths to their /api/v1 equivalent."""
+    """307-redirect legacy root-level JSON paths to their /api/v1 equivalent.
+
+    Route templates like `presets/{name}` must be filled in from the actual
+    request path params, or the redirect target would carry literal `{name}`.
+    """
     for method, path in _legacy_json_routes:
-        def endpoint(p=path):
-            return RedirectResponse(url=f"{API_V1}/{p}", status_code=307)
+        def endpoint(request: Request, p=path):
+            # substitute {param} with the values FastAPI matched on this request
+            target = re.sub(r"\{(\w+)\}", lambda m: quote(str(request.path_params.get(m.group(1), m.group(0)))), p)
+            return RedirectResponse(url=f"{API_V1}/{target}", status_code=307)
         app.add_api_route(
             f"/{path}", endpoint, methods=[method],
             include_in_schema=False, name=f"legacy_{method.lower()}_{path}",
