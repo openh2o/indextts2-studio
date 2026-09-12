@@ -63,6 +63,8 @@ function _modalOpen(opts) {
   _modal.okBtn.textContent = opts.okText || "确定";
   $("modalCancel").textContent = opts.cancelText || "取消";
   _modal.okBtn.classList.toggle("primary", !opts.danger);
+  // danger 确认键红底白字（实底非 ghost），与删除操作的语义一致
+  _modal.okBtn.classList.toggle("danger", !!opts.danger);
   _modal.prevFocus = document.activeElement;
   _modal.mask.hidden = false;
   (_modal.input.hidden ? _modal.okBtn : _modal.input).focus();
