@@ -80,6 +80,16 @@ http://127.0.0.1:7860
 - **显存不够？** 启动脚本默认已开启 FP16（`--fp16 --s2mel_fp16 --w2v_fp16`）与 25 步扩散，如仍吃紧可在 `start_server.bat` 中调整参数。
 - **端口被占用？** 启动脚本会自动清理 7860 端口的旧进程；如需换端口，编辑 `start_server.bat` 中的 `--port` 参数。
 
+## 许可证
+
+本仓库是 [IndexTTS2](https://github.com/index-tts/index-tts) 的衍生修改版，遵循其原始的 [bilibili Model Use License Agreement](LICENSE)（中文版见 [LICENSE_ZH.txt](LICENSE_ZH.txt)，两种语言版本如有冲突以中文版为准）。使用本仓库即表示你已阅读并同意该协议的全部条款。
+
+按协议 4.1(a) 条要求声明：
+
+> Any modifications made to the original model in this Derivative Work are not endorsed, warranted, or guaranteed by the original right-holder of the original model, and the original right-holder disclaims all liability related to this Derivative Work.
+>
+> 本衍生品对原模型的修改未经原权利人（bilibili Index Team）认可、担保或保证，原权利人对本衍生品及其相关的一切不承担任何责任。
+
 ## 致谢
 
 - 上游项目：[IndexTTS / IndexTTS2](https://github.com/index-tts/index-tts)（IndexTeam）
