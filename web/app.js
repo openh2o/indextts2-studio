@@ -1636,11 +1636,9 @@ async function refreshHistory() {
     histItems = r.items || [];
     $("histAuto").checked = !!r.auto_clean;
     $("histNote").textContent = `本次运行生成 · 自动清理保留最近 ${r.limit} 条`;
-    if (histBar.classList.contains("collapsed")) {
-      $("histRailCount").textContent = histItems.length;
-    } else {
-      renderHistory();
-    }
+    // 折叠时也渲染列表：隐藏态下渲染无副作用，否则展开后看到空列表，
+    // 要等下一次刷新才补上（计数有值但内容为空的观感就是"数据丢了"）
+    renderHistory();
   } catch (e) { /* history is a side feature: never block the main flow */ }
 }
 
