@@ -47,3 +47,31 @@ desktop.ini
 
 .claude
 .memsearch
+
+# ---- 上传 GitHub 前追加 ----
+# 本地 AI 工具目录
+.zcode/
+
+# 无关代码（服务运行不需要，本地保留）
+/tests/
+/cli_tests/
+/tools/
+/archive/
+/gui-test-screenshots/
+/docs/
+/profile_vram.py
+
+# 官方 README 宣传资源与 macOS 垃圾文件（服务不引用，server.py 的 /assets/ 路由服务的是 web/）
+/assets/
+# 仅 v1/CLI 批处理示例使用，Web 服务只用 examples/cases.jsonl
+/examples/batch/
+# 上游仓库的 CI / docker 发布流程，本仓库不适用
+/.github/
+# 上游 PyPI 打包清单，本仓库不发布
+/MANIFEST.in
+
+# IndexTTS v1 专属死代码（v2 推理链路 infer_v2.py 不引用，本地保留可随时恢复）
+/indextts/infer.py
+/indextts/cli.py
+/indextts/gpt/model.py
+/indextts/vqvae/

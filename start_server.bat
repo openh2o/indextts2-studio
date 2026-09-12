@@ -55,7 +55,7 @@ powershell -NoProfile -Command "$c = Get-NetTCPConnection -LocalPort 7860 -State
 
 if exist "%LOG%" del /q "%LOG%"
 
-start "IndexTTS2-server" /min cmd /c "uv run --no-sync python server.py %SRV_ARGS% >> "%LOG%" 2>&1"
+start "IndexTTS2-server" /min cmd /c "uv run --extra server --no-sync python server.py %SRV_ARGS% >> "%LOG%" 2>&1"
 
 echo Waiting for server to listen...
 for /l %%i in (1,1,60) do (
