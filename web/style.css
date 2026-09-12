@@ -447,6 +447,13 @@ textarea:focus, select:focus, input:focus {
   backdrop-filter: blur(8px);
 }
 .lib-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+/* 资源库折叠：收起时只留一行（按钮 + tabs），工具行与列表整体隐藏 */
+.lib-fold-btn { width: 26px; height: 26px; border-radius: 7px; flex: none; }
+.lib-fold-btn svg { transition: transform .18s ease; }
+.history.lib-collapsed .lib-tools,
+.history.lib-collapsed .hist-list { display: none; }
+.history.lib-collapsed .lib-fold-btn svg { transform: rotate(-90deg); }
+.history.lib-collapsed { margin-top: 0; }
 .lib-tabs { display: flex; gap: 6px; }
 .libtab {
   border: 1px solid var(--border); border-radius: 999px; cursor: pointer;

@@ -75,8 +75,15 @@ parser.add_argument("--port", type=int, default=7860)
 # so it must not be reachable from the LAN unless the user opts in.
 parser.add_argument("--host", type=str, default="127.0.0.1")
 parser.add_argument("--model_dir", type=str, default="./checkpoints")
-parser.add_argument("--fp16", action="store_true", default=False)
-parser.add_argument("--s2mel_fp16", action="store_true", default=False)
+# 无参数启动时的默认配置与 start_server.bat / WebUI「推荐配置」保持一致：
+# FP16+S2MEL_FP16 开（几乎无损、显著提速），W2V_FP16 关（8G 卡省 1GB 但需自测音色），
+# QWEN_FP16 开（本就以 float16 加载），cuDNN 自动调优关（实测负优化），steps 25 / cfg 0.7
+parser.add_argument("--fp16", action="store_true", default=True)
+parser.add_argument("--no-fp16", dest="fp16", action="store_false",
+                    help="Disable GPT main model FP16 (default on).")
+parser.add_argument("--s2mel_fp16", action="store_true", default=True)
+parser.add_argument("--no-s2mel_fp16", dest="s2mel_fp16", action="store_false",
+                    help="Disable s2mel diffusion FP16 (default on).")
 parser.add_argument("--w2v_fp16", action=argparse.BooleanOptionalAction, default=None,
                     help="Run the w2v-bert-2.0 semantic encoder in FP16 (saves ~1GB VRAM). Default off.")
 parser.add_argument("--qwen_fp16", action=argparse.BooleanOptionalAction, default=None,

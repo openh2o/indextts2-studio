@@ -1353,6 +1353,19 @@ function collectPresetState(fd) {
 const libTabs = document.querySelectorAll("#libTabs .libtab");
 let curLib = "presets";
 
+/* 资源库折叠：偏好存 localStorage，收起时只留标题行 */
+const LIB_FOLD_KEY = "libFolded";
+function libSetFolded(folded, persist = true) {
+  $("libBox").classList.toggle("lib-collapsed", folded);
+  $("libFold").title = folded ? "展开资源库" : "收起资源库";
+  $("libFold").setAttribute("aria-label", $("libFold").title);
+  if (persist) localStorage.setItem(LIB_FOLD_KEY, folded ? "1" : "0");
+}
+$("libFold").addEventListener("click", () => {
+  libSetFolded(!$("libBox").classList.contains("lib-collapsed"));
+});
+libSetFolded(localStorage.getItem(LIB_FOLD_KEY) === "1", false);
+
 /* shared: apply a preset by name; returns success */
 async function applyPresetByName(name) {
   try {
@@ -2014,10 +2027,10 @@ $("btnModelRestart").addEventListener("click", async () => {
   btn.textContent = old;
   await refreshModelPage();
 });
-/* 推荐配置：两个半精度开关开，cuDNN 自动调优关（实测负优化：BigVGAN 3.35s → 97s）；
-   步数 25、CFG 0.7 */
+/* 推荐配置：FP16 + S2MEL_FP16 开（几乎无损、显著提速），W2V_FP16 关（省 1GB 显存但需自测音色），
+   QWEN_FP16 开，cuDNN 自动调优关（实测负优化：BigVGAN 3.35s → 97s）；步数 25、CFG 0.7 */
 const RECOMMEND_CFG = {
-  s2mel_fp16: true, fp16: true, w2v_fp16: true, qwen_fp16: true, cudnn_benchmark: false,
+  s2mel_fp16: true, fp16: true, w2v_fp16: false, qwen_fp16: true, cudnn_benchmark: false,
   diffusion_steps: 25, inference_cfg_rate: 0.7,
 };
 $("btnPresetCfg").addEventListener("click", () => {
