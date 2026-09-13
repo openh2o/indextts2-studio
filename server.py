@@ -14,7 +14,6 @@ import re
 import sys
 import threading
 import time
-import traceback
 import uuid
 import warnings
 from pathlib import Path
@@ -76,6 +75,29 @@ try:
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
+
+# ---- logging --------------------------------------------------------------------
+# 持久日志写 logs/server.log（按天轮转、保留 7 天），控制台同步输出。
+# start_server.bat 重定向的 server_bg.log 只是控制台镜像（每次启动清空），
+# 排查历史问题的唯一依据是这里带时间戳的 server.log。
+import logging
+from logging.handlers import TimedRotatingFileHandler
+
+LOGS_DIR = os.path.join(current_dir, "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
+logger = logging.getLogger("indextts.server")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+if not logger.handlers:
+    _log_fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    _file_handler = TimedRotatingFileHandler(
+        os.path.join(LOGS_DIR, "server.log"), when="midnight", backupCount=7, encoding="utf-8",
+    )
+    _file_handler.setFormatter(_log_fmt)
+    _console_handler = logging.StreamHandler(sys.stdout)
+    _console_handler.setFormatter(_log_fmt)
+    logger.addHandler(_file_handler)
+    logger.addHandler(_console_handler)
 parser = argparse.ArgumentParser(
     description="IndexTTS2 FastAPI server",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -117,6 +139,26 @@ app = FastAPI(
 # 前缀 /api/v1；静态资源不走版本前缀。
 API_V1 = "/api/v1"
 api = APIRouter(prefix=API_V1)
+
+
+# 请求日志：方法/路径/状态码/耗时。高频轮询端点与静态资源降为 DEBUG，
+# 其余 INFO —— 事后能还原"谁在什么时候调了什么、结果如何"。
+@app.middleware("http")
+async def _log_requests(request: Request, call_next):
+    t0 = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+        raise
+    ms = (time.perf_counter() - t0) * 1000
+    path = request.url.path
+    line = "%s %s -> %s (%.0f ms)", request.method, path, response.status_code, ms
+    if path.startswith(("/assets", "/favicon")) or path in ("/api/v1/status", "/api/v1/metrics", "/api/v1/health"):
+        logger.debug(*line)
+    else:
+        logger.info(*line)
+    return response
 
 
 class LazyTTS:
@@ -167,7 +209,7 @@ class LazyTTS:
                         try:
                             self.normalizer.load_glossary_from_yaml(self.glossary_path)
                         except Exception as e:
-                            print(f"Failed to load glossary: {e}")
+                            logger.warning("Failed to load glossary: %s", e)
         return self.cfg
 
     @property
@@ -180,7 +222,7 @@ class LazyTTS:
                 if self._tts is None:
                     self._ensure_light()
                     self._apply_backend_flags()
-                    print(">> Loading IndexTTS2 main model on first use...", flush=True)
+                    logger.info("Loading IndexTTS2 main model on first use...")
                     self._set_phase("loading")
                     try:
                         from indextts.infer_v2 import IndexTTS2
@@ -199,7 +241,7 @@ class LazyTTS:
                         self.cfg = t.cfg
                         self._tts = t
                         self._set_phase("ready")
-                        print(">> IndexTTS2 main model loaded.", flush=True)
+                        logger.info("IndexTTS2 main model loaded.")
                     except Exception:
                         self._set_phase("error")
                         raise
@@ -569,8 +611,8 @@ def model_config(req: dict = Body(...)):
         for key, val in req.items():
             tts.set_runtime(**{key: val})
         cfg = tts.state()
-        print(f">> Runtime config updated: steps={cfg['diffusion_steps']} cfg_rate={cfg['inference_cfg_rate']} "
-              f"s2mel_fp16={cfg['s2mel_fp16']} fp16={cfg['fp16']}", flush=True)
+        logger.info("Runtime config updated: steps=%s cfg_rate=%s s2mel_fp16=%s fp16=%s",
+                    cfg["diffusion_steps"], cfg["inference_cfg_rate"], cfg["s2mel_fp16"], cfg["fp16"])
     return {"ok": True, **tts.state()}
 
 
@@ -581,6 +623,7 @@ def model_load():
             tts.ensure_loaded()
             result = {"ok": True}
         except Exception as e:
+            logger.error("Model load failed: %s", e, exc_info=True)
             result = {"ok": False, "error": str(e)}
     return {**result, **tts.state()}
 
@@ -615,9 +658,10 @@ def model_restart(req: dict | None = Body(None)):
             tts.rebuild()
             result = {"ok": True}
         except Exception as e:
+            logger.error("Model rebuild failed: %s", e, exc_info=True)
             result = {"ok": False, "error": str(e)}
     if result["ok"]:
-        print(f">> Model restarted with config: {cfg}", flush=True)
+        logger.info("Model restarted with config: %s", cfg)
     return {**result, **tts.state()}
 
 
@@ -848,6 +892,8 @@ def do_tts(
     job_id, jobs_ahead = _register_job(client_id)
     with _JOBS_LOCK:
         stop_event = _JOBS[job_id]["stop_event"]
+    logger.info("TTS job %s queued: chars=%d emo_mode=%s ahead=%d naming=%s",
+                job_id, len(text), emo_mode, jobs_ahead, file_naming)
 
     def record_event(ev):
         progress_q.put(ev)
@@ -877,6 +923,8 @@ def do_tts(
                     "history_id": ev.get("history_id"),
                     "mel_capped": ev.get("mel_capped", False),
                 }
+                logger.info("TTS job %s done: file=%s elapsed=%ss mel_capped=%s",
+                            job_id, ev.get("file"), ev.get("elapsed"), ev.get("mel_capped", False))
             elif ev["type"] == "error":
                 job["error"] = ev.get("detail") or "生成失败"
                 job["finished_at"] = time.time()
@@ -884,9 +932,11 @@ def do_tts(
                     # 取消/停止路径也用 error 事件收尾（前端靠它终止 SSE），
                     # 但状态保留 cancelled，别把用户主动取消显示成“生成失败”
                     job["stage_desc"] = "已取消"
+                    logger.info("TTS job %s cancelled: %s", job_id, job["error"])
                 else:
                     job["state"] = "error"
                     job["stage_desc"] = "生成失败"
+                    logger.error("TTS job %s failed: %s", job_id, job["error"])
 
     def run_infer():
         try:
@@ -920,6 +970,7 @@ def do_tts(
                         else:
                             job["state"] = "running"
                             job["started_at"] = time.time()
+                            logger.info("TTS job %s started (waited %.1fs)", job_id, job["started_at"] - t0)
                 if short_circuit is not None:
                     record_event({"type": "error", "detail": short_circuit})
                     return
@@ -931,7 +982,7 @@ def do_tts(
             finally:
                 _INFER_LOCK.release()
         except Exception as e:
-            traceback.print_exc()
+            logger.error("TTS worker crashed: %s", e, exc_info=True)
             # 兜底:任何未捕获异常都必须以终止事件收尾,否则 SSE 会永久挂起
             try:
                 record_event({"type": "error", "detail": f"Inference failed: {e}"})
@@ -1006,11 +1057,11 @@ def do_tts(
                     pass
                 detail = "已停止生成，模型已重新加载"
             except Exception as e:
-                traceback.print_exc()
+                logger.error("TTS job %s: model reload after stop failed: %s", job_id, e, exc_info=True)
                 detail = f"已停止生成，模型重新加载失败，下次生成将自动加载: {e}"
             record_event({"type": "error", "detail": detail})
         except Exception as e:
-            traceback.print_exc()
+            logger.error("TTS job %s inference error: %s", job_id, e, exc_info=True)
             record_event({"type": "error", "detail": f"Inference failed: {e}"})
         finally:
             if model is not None:
@@ -1436,6 +1487,6 @@ if __name__ == "__main__":
     import uvicorn
     removed = _clean_stale_outputs()
     if removed:
-        print(f">> Cleaned {removed} output file(s) older than {OUTPUTS_RETENTION_DAYS} days.", flush=True)
-    print(f"IndexTTS2 server starting... port {cmd_args.port}", flush=True)
+        logger.info("Cleaned %d output file(s) older than %d days.", removed, OUTPUTS_RETENTION_DAYS)
+    logger.info("IndexTTS2 server starting... port %d", cmd_args.port)
     uvicorn.run(app, host=cmd_args.host, port=cmd_args.port, log_level="warning")
