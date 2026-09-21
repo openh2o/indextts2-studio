@@ -75,3 +75,5 @@ desktop.ini
 /indextts/cli.py
 /indextts/gpt/model.py
 /indextts/vqvae/
+# 个人恢复笔记：含本机硬件/网络/路径等指纹信息，只保留在本地，绝不入库
+/RECOVERY.md
