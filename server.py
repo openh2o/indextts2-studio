@@ -400,10 +400,25 @@ def _validate_audio_upload(data: bytes, label: str) -> None:
     if len(data) > AUDIO_MAX_BYTES:
         raise HTTPException(
             413,
-            f"{label}过大（{len(data) / 1048576:.0f} MB，上限 {AUDIO_MAX_BYTES // 1048576} MB）",
+            f"{label}过大（{len(data) / 1048576:.1f} MB，上限 {AUDIO_MAX_BYTES // 1048576} MB）",
         )
     if not _looks_like_audio(data):
         raise HTTPException(400, f"{label}不是可识别的音频文件（支持 wav/mp3/flac/ogg/m4a）")
+
+
+def _reject_oversized_upload(upload, label: str) -> None:
+    """在 read() 之前按 UploadFile.size 提前拒绝超大上传。
+
+    UploadFile.size 由 Starlette 在解析 multipart 时填好（此时文件已落到
+    spool 临时文件），读它不触发任何 IO。size 为 None 时（非常规构造）跳过，
+    由后面的 _validate_audio_upload 兜底。
+    """
+    size = getattr(upload, "size", None)
+    if size is not None and size > AUDIO_MAX_BYTES:
+        raise HTTPException(
+            413,
+            f"{label}过大（{size / 1048576:.1f} MB，上限 {AUDIO_MAX_BYTES // 1048576} MB）",
+        )
 
 
 # outputs/ 保留策略：历史自动清理只覆盖"本次运行"生成过的文件，服务器重启后
@@ -829,6 +844,10 @@ def do_tts(
             413,
             f"情感描述文本过长（{len(emo_text)} 字，上限 {MAX_EMO_TEXT_CHARS} 字）",
         )
+    # 先看 UploadFile.size 再 read()：read() 会把整个文件读进内存，
+    # 若等 _validate_audio_upload 才发现超限，峰值内存已等于文件大小
+    # （误选一个 2GB 的 wav 就会先在内存里摊开 2GB 才被拒）。
+    _reject_oversized_upload(spk_audio, "音色参考音频")
     try:
         spk_data = spk_audio.file.read()
     except Exception as e:
@@ -848,6 +867,7 @@ def do_tts(
 
     emo_ref_path = None
     if emo_audio is not None:
+        _reject_oversized_upload(emo_audio, "情感参考音频")
         try:
             emo_data = emo_audio.file.read()
         except Exception as e:
@@ -1086,17 +1106,25 @@ def audio(name: str):
 
 
 # ---- generation history -------------------------------------------------------
-# Scope: this server run only (in-memory, nothing persisted). Writes happen from
-# the inference thread, which _INFER_LOCK already serializes, so the list needs no
-# lock of its own -- reads just take a snapshot of an append-only list.
+# Scope: this server run only (in-memory, nothing persisted).
+#
+# 关于锁：这里必须有自己的锁。写入侧(_history_add)确实跑在推理线程里、已被
+# _INFER_LOCK 串行化，但 history_clear() 与 history_remove() 跑在 HTTP 线程中，
+# 完全不持 _INFER_LOCK；而 history_list() 若直接返回 _history 本体，
+# 序列化过程中列表被并发修改就会 RuntimeError / 返回残缺数据。
+# 锁顺序固定为 _INFER_LOCK -> _HISTORY_LOCK（单向，不存在反向获取，故不会死锁）。
 HISTORY_LIMIT = 20          # auto-clean keeps the newest N; older entries drop off
 
-_history = []               # newest first
+_HISTORY_LOCK = threading.Lock()
+_history = []               # newest first（读写一律经 _HISTORY_LOCK）
 _history_auto_clean = True
 
 
 def _history_trim():
-    """Drop entries past HISTORY_LIMIT, deleting their audio files too."""
+    """Drop entries past HISTORY_LIMIT, deleting their audio files too.
+
+    调用方必须已持有 _HISTORY_LOCK（内部不再加锁，避免与 _history_add 自锁）。
+    """
     while len(_history) > HISTORY_LIMIT:
         old = _history.pop()
         if not _history_auto_clean:
@@ -1124,60 +1152,76 @@ def _history_add(file_name: str, text: str, elapsed: float, emo_mode: int) -> di
         "size": size,
         "created_at": time.time(),
     }
-    _history.insert(0, entry)
-    _history_trim()
+    with _HISTORY_LOCK:
+        _history.insert(0, entry)
+        _history_trim()
     return entry
 
 
 @api.get("/history")
 def history_list():
+    # 必须取快照：直接把 _history 交给 JSONResponse，序列化是流式的，
+    # 期间若有 history_remove/clear 或推理线程 insert，会抛
+    # RuntimeError("list changed size during iteration") 或发出半截列表。
+    with _HISTORY_LOCK:
+        items = list(_history)
+        auto_clean = _history_auto_clean
     return JSONResponse({
-        "items": _history,
+        "items": items,
         "limit": HISTORY_LIMIT,
-        "auto_clean": _history_auto_clean,
-        "count": len(_history),
+        "auto_clean": auto_clean,
+        "count": len(items),
     })
 
 
 @api.post("/history/config")
 def history_config(auto_clean: bool = Form(...)):
     global _history_auto_clean
-    _history_auto_clean = bool(auto_clean)
-    return JSONResponse({"auto_clean": _history_auto_clean, "count": len(_history)})
+    with _HISTORY_LOCK:
+        _history_auto_clean = bool(auto_clean)
+        snapshot = (bool(_history_auto_clean), len(_history))
+    return JSONResponse({"auto_clean": snapshot[0], "count": snapshot[1]})
 
 
 @api.delete("/history")
 def history_clear():
     """Clear the list; with auto-clean on, the audio files go too."""
-    removed = len(_history)
-    if _history_auto_clean:
-        for e in list(_history):
+    # 锁内只做"摘下来"，删文件是 IO、放在锁外，避免拿着锁做慢操作。
+    with _HISTORY_LOCK:
+        removed = len(_history)
+        doomed = list(_history)
+        auto_clean = _history_auto_clean
+        _history.clear()
+    if auto_clean:
+        for e in doomed:
             try:
                 os.remove(os.path.join(OUTPUTS_DIR, os.path.basename(e["file"])))
             except OSError:
                 pass
-    _history.clear()
     return JSONResponse({"ok": True, "removed": removed, "count": 0})
 
 
 @api.delete("/history/{item_id}")
 def history_remove(item_id: str):
-    hit = None
-    for e in _history:
-        if e["id"] == item_id:
-            hit = e
-            break
-    if hit is None:
-        raise HTTPException(404, "History entry not found")
-    # 原地删除：_history 是全局单例，推理线程会向它 insert；此处一旦重绑定
-    # 新列表，并发插入会落到被丢弃的旧列表上（条目和自动清理都丢）。
-    _history.remove(hit)
-    if _history_auto_clean:
+    with _HISTORY_LOCK:
+        hit = None
+        for e in _history:
+            if e["id"] == item_id:
+                hit = e
+                break
+        if hit is None:
+            raise HTTPException(404, "History entry not found")
+        # 原地删除：_history 是全局单例，推理线程会向它 insert；此处一旦重绑定
+        # 新列表，并发插入会落到被丢弃的旧列表上（条目和自动清理都丢）。
+        _history.remove(hit)
+        auto_clean = _history_auto_clean
+        count = len(_history)
+    if auto_clean:
         try:
             os.remove(os.path.join(OUTPUTS_DIR, os.path.basename(hit["file"])))
         except OSError:
             pass
-    return JSONResponse({"ok": True, "count": len(_history)})
+    return JSONResponse({"ok": True, "count": count})
 
 
 @api.get("/presets")
