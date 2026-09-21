@@ -103,7 +103,7 @@ parser = argparse.ArgumentParser(
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 parser.add_argument("--verbose", action="store_true", default=False)
-parser.add_argument("--port", type=int, default=7860)
+parser.add_argument("--port", type=int, default=8076)
 # Default to loopback: the server has no auth and can delete files/presets,
 # so it must not be reachable from the LAN unless the user opts in.
 parser.add_argument("--host", type=str, default="127.0.0.1")
@@ -511,25 +511,19 @@ def metrics():
 # ---- web UI: static files live in web/ and are served from the site root ----
 _WEB_DIR = os.path.join(current_dir, "web")
 
-# 静态资源内容指纹：启动时读 web/ 下各文件 md5 前 8 位作版本号，注入 index.html
-# 的 ?v= 占位符。文件改动 → 指纹变 → URL 变，配合长缓存头让浏览器自动拉新，
-# 不再手工维护 ?v=20260912 这类日期版本号。
-_ASSET_FINGERPRINT = {}
-
-
-def _build_asset_fingerprints():
-    for fname in os.listdir(_WEB_DIR):
-        fpath = os.path.join(_WEB_DIR, fname)
-        if not os.path.isfile(fpath) or fname == "index.html":
-            continue
-        try:
-            with open(fpath, "rb") as f:
-                _ASSET_FINGERPRINT[fname] = hashlib.md5(f.read()).hexdigest()[:8]
-        except OSError:
-            continue
-
-
-_build_asset_fingerprints()
+# 静态资源的 ?v= 版本号，按需现算（不再在启动时缓存）。
+#
+# 为什么不用“启动时算好内容 md5 存字典”：那样改完前端文件后，必须重启服务
+# 才会更新 ?v=，否则浏览器会一直用旧缓存；而重启一次要重新加载 4.6G 模型。
+# 改成每次请求现算后，前端改完普通刷新即可拿到新文件。
+# 代价只是一次 os.stat，比读整个文件算 md5 便宜得多；
+# 用“文件大小 + 纳秒级 mtime”做指纹，保存即变化，精度足够。
+def _asset_fingerprint(fname: str) -> str:
+    try:
+        st = os.stat(os.path.join(_WEB_DIR, fname))
+    except OSError:
+        return "0"
+    return hashlib.md5(f"{st.st_size}:{st.st_mtime_ns}".encode()).hexdigest()[:8]
 
 
 def _asset_response(name: str):
@@ -568,7 +562,7 @@ def index():
     except OSError as e:
         raise HTTPException(500, f"Failed to read index.html: {e}")
     # 把 ?v=xxx 占位符替换为内容指纹；favicon 之类没指纹的保持原样
-    html = re.sub(r'\?v=\{([a-z0-9_.]+)\}', lambda m: f"?v={_ASSET_FINGERPRINT.get(m.group(1), '0')}", html)
+    html = re.sub(r'\?v=\{([a-z0-9_.]+)\}', lambda m: f"?v={_asset_fingerprint(m.group(1))}", html)
     return Response(content=html, media_type="text/html", headers={"Cache-Control": "no-cache"})
 
 
@@ -1483,10 +1477,34 @@ def _register_legacy_redirects():
 _register_legacy_redirects()
 
 
+def _preload_light_components():
+    """Warm up config/normalizer/tokenizer off the request path.
+
+    ``TextNormalizer.load()`` loads/compiles the WeText FST rules and costs ~12s
+    on a cold filesystem cache. Running it here means the browser's first
+    ``/glossary`` and ``/segments`` calls hit a ready normalizer instead of
+    blocking the page for ~12 seconds. Failures are non-fatal: the routes call
+    ``tts._ensure_light()`` themselves, so a broken preload just falls back to
+    the old lazy behaviour.
+    """
+    started = time.perf_counter()
+    try:
+        tts._ensure_light()
+        logger.info(
+            "Light components preloaded in %.1fs (first page load is now instant).",
+            time.perf_counter() - started,
+        )
+    except Exception:
+        logger.warning("Preloading light components failed", exc_info=True)
+
+
 if __name__ == "__main__":
     import uvicorn
     removed = _clean_stale_outputs()
     if removed:
         logger.info("Cleaned %d output file(s) older than %d days.", removed, OUTPUTS_RETENTION_DAYS)
     logger.info("IndexTTS2 server starting... port %d", cmd_args.port)
+    # Delay slightly so uvicorn binds the port first and the launcher script
+    # sees "ready" immediately; the warm-up then runs while the page loads.
+    threading.Timer(1.0, _preload_light_components).start()
     uvicorn.run(app, host=cmd_args.host, port=cmd_args.port, log_level="warning")

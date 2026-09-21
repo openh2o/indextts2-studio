@@ -81,7 +81,12 @@
       </div>
     </div>
 
-    <details class="fold emo-fold">
+    <div class="opt-divider"><span>以下为可选设置</span></div>
+
+    <!-- 情感控制默认展开（open 直接写在标签上，首屏就是展开的，不会先收起再弹开）：
+         这个面板使用频率最高，切情感模式、调权重、传情感参考音频都在这里。
+         用户手动收起后的状态由 app.js 记在 localStorage 里，下次刷新保持。 -->
+    <details class="fold emo-fold" id="emoFold" open>
       <summary>情感控制 <span class="q" title="默认与音色参考音频相同；可切换情感参考音频 / 向量 / 描述文本">?</span></summary>
       <select id="emoMode">
         <option value="0" selected>与音色参考音频相同</option>
@@ -96,6 +101,18 @@
           <span class="drop-main" id="emoName">点击选择情感参考音频</span>
           <span class="drop-sub">表达目标情绪的音频片段</span>
         </label>
+        <!-- 情感参考的试听条。此前选完文件只能看到一行文件名，没法确认
+             选中的是不是想要的那段情绪，只能凭记忆或去别处播放。
+             这里跟音色参考共用 .refrow 布局，但不带波形 —— 它位于
+             "可选设置"折叠区里，加一条 72px 的波形会把面板撑得很高。 -->
+        <div class="refrow" id="emoRefRow" hidden>
+          <button class="iconbtn" id="emoPlay" type="button" aria-label="播放或暂停情感参考音频" title="播放/暂停">
+            <svg id="emoPlayIcon" width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          </button>
+          <span class="range" id="emoTime">0.00s / 0.00s</span>
+          <span class="ref-name" id="emoFileName" title=""></span>
+          <button class="btn ghost mini ref-change" id="emoChange" type="button">更换音频</button>
+        </div>
       </div>
 
       <div id="emoVecBox" class="emo-box" hidden>
@@ -154,19 +171,14 @@
       <div class="gl-table" id="glTable"></div>
     </details>
 
-    <!-- main CTA pinned at panel bottom -->
-    <div class="cta">
-      <div class="gen-summary mono" id="genSummary"></div>
-      <button class="btn primary big" id="genBtn">
-        <svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-        生成语音
-      </button>
-      <div class="hint mono" id="loadHint" role="status" aria-live="polite"></div>
-    </div>
   </section>
 
   <!-- ===== right: result showcase ===== -->
   <section class="card resultcard" id="resultCard">
+
+    <!-- 主视觉区：空状态 / 生成中 / 结果三态叠放在同一格里（.stage 用 grid 实现）。
+         容器高度恒为三者最大值，所以切换时不会有任何位移。 -->
+    <div class="stage">
 
     <!-- idle -->
     <div class="ph" id="emptyHint">
@@ -179,8 +191,13 @@
     </div>
 
     <!-- loading -->
-    <div class="sc-loading" id="loadingBox" hidden>
-      <div class="spinner"></div>
+    <div class="sc-loading is-hidden" id="loadingBox">
+      <!-- 生成中的波浪动画：尺寸和结果态的 #waveTrim 完全一致，
+           所以切换时这一块纹丝不动，只是"波浪"变成了"真波形"。 -->
+      <div class="genwave" aria-hidden="true">
+        <div class="genwave-baseline"></div>
+        <div class="genwave-bars" id="genWaveBars"></div>
+      </div>
       <div class="sc-info">
         <div class="sc-stage" id="pStage">准备中…</div>
         <div class="pbar"><i id="pbarFill"></i></div>
@@ -192,22 +209,30 @@
           <span class="pstep" data-s="3">声学合成</span><i></i>
           <span class="pstep" data-s="4">声码解码</span>
         </div>
-        <button class="btn ghost mini cancelbtn" id="cancelBtn" type="button" hidden>取消生成</button>
       </div>
     </div>
-    <div class="err" id="errBox"></div>
-
     <!-- result -->
-    <div id="resultBody" style="display:none">
+    <div class="is-hidden" id="resultBody">
+      <!-- 波形占满整宽，播放按钮与时间信息排在它下方一行 —— 音乐播放器的样子，
+           而不是把按钮立在波形左边（那样既像视频播放器，又挤掉波形 68px 宽度）。 -->
       <div class="bigplayer">
-        <button class="iconbtn bigp" id="bigPlay" aria-label="播放或暂停">
-          <svg id="bigPlayIcon" width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-        </button>
-        <div class="bp-main">
-          <canvas id="waveTrim" aria-label="音频波形，拖拽选择剪辑范围"></canvas>
+        <canvas id="waveTrim" aria-label="音频波形，拖拽选择剪辑范围"></canvas>
+        <div class="bp-bar">
+          <button class="iconbtn bigp" id="bigPlay" aria-label="播放或暂停">
+            <svg id="bigPlayIcon" width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          </button>
           <div class="bp-meta">
             <span class="range mono" id="trimRange">—</span>
             <span class="mono" id="genMeta"></span>
+          </div>
+          <!-- 音量：原生 <audio controls> 是隐藏的（播放条由自定义波形代替），
+               音量调节也跟着没了，这里补一个。滑块沿用参数区那套 range 样式。 -->
+          <div class="vol-ctl">
+            <button class="iconbtn vol-mute" id="volMute" type="button" aria-label="静音" title="静音">
+              <svg id="volIcon" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></svg>
+            </button>
+            <input type="range" id="volRange" min="0" max="1" step="0.01" value="1" aria-label="音量">
           </div>
           <audio id="player" controls hidden></audio>
         </div>
@@ -224,6 +249,26 @@
         </button>
       </div>
       <div class="dl-row"><span class="dl-name" id="dlName"></span></div>
+    </div>
+    </div><!-- /.stage -->
+
+    <div class="err" id="errBox"></div>
+
+    <!-- 生成操作区：从左侧参数栏搬到结果区下方。
+         点完按钮，进度和结果就在它正上方出现，视线不用横跨两栏。 -->
+    <div class="cta">
+      <div class="gen-summary mono" id="genSummary"></div>
+      <button class="btn primary big" id="genBtn">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        生成语音
+      </button>
+      <!-- 停止生成：和上面的"生成语音"占同一位置、同样宽度，两者互斥显示，
+           观感上是"同一个按钮换了身份"，而不是凭空多出一个按钮。 -->
+      <button class="btn big cancelbtn" id="cancelBtn" type="button" hidden>
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+        停止生成
+      </button>
+      <div class="hint mono" id="loadHint" role="status" aria-live="polite"></div>
     </div>
 
     <!-- preset / example library: secondary, bottom -->

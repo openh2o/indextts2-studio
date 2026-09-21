@@ -51,6 +51,41 @@ function _modalSetup() {
     if (e.key === "Escape" && !_modal.mask.hidden) _modalClose(false);
   });
 }
+/* ---------------- 二次确认：再点一次同一个按钮 ----------------
+   原先删除预设弹的是居中模态框，鼠标得从列表一路挪到屏幕中央、点完再挪回来，
+   删几条就来回跑几趟。这里改成"按钮自己变成确认态"：
+   第一次点 → 变红、文字变"✓ 删除"、带一圈脉冲；
+   2.6 秒内再点 → 真删；超时、点了别处、或列表刷新 → 自动弹回。
+   手始终停在原地，一次点击就能确认。 */
+const _armTimers = new WeakMap();
+function armConfirm(btn, onConfirm, ms = 2600) {
+  const reset = () => {
+    delete btn.dataset.armed;
+    btn.classList.remove("armed");
+    btn.textContent = btn.dataset.orig || "✕";
+    btn.title = btn.dataset.origTitle || "删除";
+    _armTimers.delete(btn);
+  };
+
+  if (btn.dataset.armed === "1") {        // 已在待确认态 -> 这次是真删
+    clearTimeout(_armTimers.get(btn));
+    reset();
+    onConfirm();
+    return;
+  }
+
+  if (btn.dataset.armed === undefined) {  // 第一次进入时记下原样，便于还原
+    btn.dataset.orig = btn.textContent;
+    btn.dataset.origTitle = btn.title;
+  }
+  btn.dataset.armed = "1";
+  btn.classList.add("armed");
+  btn.textContent = "✓ 删除";
+  btn.title = "再点一次确认删除";
+  clearTimeout(_armTimers.get(btn));
+  _armTimers.set(btn, setTimeout(() => { if (btn.dataset.armed === "1") reset(); }, ms));
+}
+
 function _modalOpen(opts) {
   _modalSetup();
   $("modalTitle").textContent = opts.title || "";
@@ -366,12 +401,14 @@ function sizeCanvas(cv) {
 
 function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 
-function drawHeaderWave(t) {
-  t = t || waveT || 0;
-  const { w, h } = sizeCanvas(hWave);
-  hCtx.clearRect(0, 0, w, h);
+/* 柱状波浪的通用画法：标题栏那条细波浪，和结果区生成中的大波浪，
+   本来就是同一套算法，区别只在 canvas 尺寸和柱子疏密。 */
+function drawWaveBars(cv, ctx, t, step, barW) {
+  const { w, h } = sizeCanvas(cv);
+  ctx.clearRect(0, 0, w, h);
+  if (!w || !h) return;                 // 元素隐藏时尺寸为 0，直接跳过
   const accent = cssVar("--accent"), primary = cssVar("--primary");
-  const n = Math.floor(w / 4);
+  const n = Math.floor(w / step);
   const mid = h / 2;
   for (let i = 0; i < n; i++) {
     let a;
@@ -382,18 +419,51 @@ function drawHeaderWave(t) {
       a = 0.06 + 0.05 * Math.sin(i * 0.5 + t / 900);
     }
     const bh = Math.max(2, a * h);
-    hCtx.fillStyle = genAnim.on && i / n < genAnim.progress ? primary : accent;
-    hCtx.globalAlpha = genAnim.on ? 0.95 : 0.5;
-    hCtx.fillRect(i * 4, mid - bh / 2, 2.4, bh);
+    ctx.fillStyle = genAnim.on && i / n < genAnim.progress ? primary : accent;
+    ctx.globalAlpha = genAnim.on ? 0.95 : 0.5;
+    ctx.fillRect(i * step, mid - bh / 2, barW, bh);
   }
-  hCtx.globalAlpha = 1;
+  ctx.globalAlpha = 1;
+}
+
+function drawHeaderWave(t) { drawWaveBars(hWave, hCtx, t || waveT || 0, 4, 2.4); }
+
+/* 生成中的推理动画：45 根柱子，幅度 = 正弦包络 × 随机，周期与延迟各自随机。
+   建好一次就不再改动，动画全部交给 CSS —— 主线程只在进度变化时切一下 class。 */
+const genBarsBox = $("genWaveBars");
+function buildGenBars() {
+  if (!genBarsBox || genBarsBox.childElementCount) return;
+  const N = 45;
+  let html = "";
+  for (let i = 0; i < N; i++) {
+    const env = Math.sin((i / N) * Math.PI * 2.5) * 0.5 + 0.5;
+    const noise = 0.6 + Math.random() * 0.5;
+    const s = Math.max(0.15, Math.min(env * noise, 1));
+    const d = (0.5 + Math.random() * 0.7).toFixed(2);
+    const dl = (Math.random() * 0.4).toFixed(2);
+    html += `<i style="--s:${s.toFixed(2)};--d:${d}s;--dl:${dl}s"></i>`;
+  }
+  genBarsBox.innerHTML = html;
+}
+
+/* 进度染色：已生成的那一段换成主色 */
+function paintGenProgress(p) {
+  if (!genBarsBox) return;
+  const bars = genBarsBox.children;
+  const k = Math.round((p || 0) * bars.length);
+  for (let i = 0; i < bars.length; i++) bars[i].classList.toggle("done", i < k);
 }
 setInterval(() => { if (!document.hidden) drawHeaderWave(waveT + 16); }, 250); // gentle idle refresh
 let waveRAF = 0;
 function waveLoop(t) {
   waveT = t;
-  if (genAnim.on && !document.hidden) { drawHeaderWave(t); waveRAF = requestAnimationFrame(waveLoop); }
-  else { waveRAF = 0; if (!document.hidden) drawHeaderWave(0); }
+  if (genAnim.on && !document.hidden) {
+    drawHeaderWave(t);
+    waveRAF = requestAnimationFrame(waveLoop);
+  } else {
+    waveRAF = 0;
+    if (!document.hidden) drawHeaderWave(0);
+  }
 }
 /* 后台标签页暂停：合并轮询会触发 nvidia-smi 子进程，闲置时不空转。
    生成进行中则不停 —— SSE 是推送流不受影响，但回前台要立即刷新一次。 */
@@ -502,14 +572,96 @@ emoDrop.addEventListener("dragleave", () => emoDrop.classList.remove("over"));
 emoDrop.addEventListener("drop", (e) => { e.preventDefault(); emoDrop.classList.remove("over"); if (e.dataTransfer.files[0]) setEmoFile(e.dataTransfer.files[0]); });
 emoFile.addEventListener("change", () => emoFile.files[0] && setEmoFile(emoFile.files[0]));
 function setEmoFile(f, persist = true) {
+  // 提交时读的是 emoFile.files[0]，不是这里维护的界面状态。
+  // 拖拽进来的文件必须同步写回 <input>，否则拖拽上一眼看去已生效，
+  // 点“生成”却发现情感音频没被带上。
+  assignFile($("emoFile"), f);
   $("emoName").textContent = f.name;
   if (persist) setDraftBlob(DRAFT_AUDIO_KEYS.emo, f).catch(() => {});
+  loadEmoAudio(f);
 }
 function clearEmoFile() {
   emoFile.value = "";
   $("emoName").textContent = "点击选择情感参考音频";
   setDraftBlob(DRAFT_AUDIO_KEYS.emo, null).catch(() => {});
+  resetEmoPlayer();
 }
+
+/* ---- 情感参考音频的试听 ----
+   跟音色参考是同一套路数（独立的 Audio 对象 + 共享的 AudioContext 解码），
+   区别只是不做波形：情感参考位于"可选设置"的折叠区里，一条 72px 的波形
+   会把这个次要面板撑得很高，而这里真正需要的只是"确认一下这段音频对不对"。 */
+const emoAudio = new Audio();
+const emoPlay = $("emoPlay"), emoPlayIcon = $("emoPlayIcon");
+const emoTimeEl = $("emoTime"), emoRefRow = $("emoRefRow");
+let emoBuffer = null, emoPlaying = false, emoSeekFrac = 0, emoUrl = null;
+
+const EMO_FMT = (t) => `${t.toFixed(2)}s`;
+function resetEmoPlayer() {
+  emoAudio.pause();
+  emoPlaying = false;
+  emoSeekFrac = 0;
+  emoBuffer = null;
+  emoPlayIcon.innerHTML = PLAY_SVG;
+  emoRefRow.hidden = true;
+  $("emoFileName").textContent = "";
+  $("emoFileName").title = "";
+  emoTimeEl.textContent = "0.00s / 0.00s";
+}
+function emoTick() {
+  if (!emoBuffer) return;
+  const d = emoBuffer.duration;
+  if (emoPlaying) emoSeekFrac = Math.min(emoAudio.currentTime / d, 1);
+  emoTimeEl.textContent = `${EMO_FMT(emoPlaying ? emoAudio.currentTime : emoSeekFrac * d)} / ${EMO_FMT(d)}`;
+  if (emoPlaying) requestAnimationFrame(emoTick);
+}
+function loadEmoAudio(f) {
+  resetEmoPlayer();
+  try {
+    if (emoUrl) URL.revokeObjectURL(emoUrl);
+    emoUrl = URL.createObjectURL(f);
+    emoAudio.src = emoUrl;
+    $("emoFileName").textContent = f.name;
+    $("emoFileName").title = f.name;
+    emoRefRow.hidden = false;
+    emoTimeEl.textContent = "读取中…";
+    f.arrayBuffer().then((ab) => getAC().decodeAudioData(ab)).then((buf) => {
+      emoBuffer = buf;
+      emoPlaying = false;
+      emoSeekFrac = 0;
+      emoTimeEl.textContent = `0.00s / ${buf.duration.toFixed(2)}s`;
+    }).catch(() => {
+      // 解不开就只留文件名，不显示一个按了没反应的播放键
+      emoRefRow.hidden = true;
+    });
+  } catch (e) { emoRefRow.hidden = true; }
+}
+emoAudio.addEventListener("ended", () => {
+  emoPlaying = false;
+  emoAudio.currentTime = 0;
+  emoSeekFrac = 0;
+  emoPlayIcon.innerHTML = PLAY_SVG;
+  emoTick();
+});
+emoPlay.addEventListener("click", async () => {
+  if (!emoBuffer) return;
+  if (emoPlaying) {
+    emoAudio.pause();
+    emoPlaying = false;
+    emoPlayIcon.innerHTML = PLAY_SVG;
+    emoTick();
+  } else {
+    emoAudio.currentTime = emoSeekFrac * emoBuffer.duration;
+    await emoAudio.play().catch(() => {});
+    emoPlaying = true;
+    emoPlayIcon.innerHTML = PAUSE_SVG;
+    requestAnimationFrame(emoTick);
+  }
+});
+$("emoChange").addEventListener("click", () => {
+  clearEmoFile();
+  emoFile.click();
+});
 
 function drawSpkWave() {
   const { w, h } = sizeCanvas(spkWave);
@@ -589,6 +741,9 @@ function resetSpkSelection() {
   spkPlaying = false;
   spkSeekFrac = 0;
   spkBuffer = null;
+  // 同步清空 <input>：否则“更换音频”里取消文件选择后，界面已重置，
+  // 提交却仍会拿到上一次的文件；顺带保证重选同一个文件也能触发 change。
+  $("spkFile").value = "";
   // 草稿里的音频 blob 一并清掉:否则"更换音频"后取消文件选择,
   // 刷新页面会把旧音频从 IndexedDB 恢复回来
   setDraftBlob(DRAFT_AUDIO_KEYS.spk, null).catch(() => {});
@@ -601,6 +756,10 @@ function resetSpkSelection() {
 }
 
 function setSpkFile(f, persist = true) {
+  // 提交时读的是 spkFile.files[0]，不是这个函数维护的界面状态。
+  // 拖拽进来的文件必须同步写回 <input>，否则界面看着已经换好音频，
+  // 点“生成”却拿不到文件（报“请先选择音色参考音频”）或仍旧用上一次的音频。
+  assignFile($("spkFile"), f);
   $("spkFileName").textContent = f.name;
   $("spkFileName").title = f.name;
   $("spkDrop").hidden = true;
@@ -780,7 +939,9 @@ function updateGenSummary() {
     curPresetName ? `预设: ${curPresetName}` : "预设: 无",
     `采样: temp ${Number($("temperature").value).toFixed(2)} / top_p ${Number($("topP").value).toFixed(2)} / top_k ${$("topK").value}`,
   ];
-  $("genSummary").textContent = parts.join("  ·  ");
+  const sumEl = $("genSummary");
+  sumEl.textContent = parts.join("  ·  ");
+  sumEl.title = parts.join("\n");   // 悬停看完整参数，每项一行
 }
 ["emoMode", "emoWeight", "temperature", "topP", "topK"].forEach((id) => {
   $(id).addEventListener("input", updateGenSummary);
@@ -801,17 +962,24 @@ let curAbort = null;          // AbortController for the SSE fetch
 let curJobState = "";         // queued | running | stopping
 function jobActive() { return genBtn.disabled; }
 
+// 三态现在是叠在同一格里的（.stage），显示/隐藏用 visibility 控制而不是
+// display —— 隐藏的元素仍然占位，容器高度才不会跟着状态变。
 function setResultVisible(visible) {
-  resultBody.style.display = visible ? "block" : "none";
-  emptyHint.style.display = visible ? "none" : "";
+  resultBody.classList.toggle("is-hidden", !visible);
+  emptyHint.classList.toggle("is-hidden", visible);
 }
 
 function showLoading(stage, cancellable = true) {
-  setResultVisible(false);
-  loadingBox.hidden = false;
+  // 这里不能用 setResultVisible(false)：那个函数在"不可见"时会把 #emptyHint
+  // （"还没有生成的音频"）显示出来，导致生成期间空状态占位和进度条同时出现
+  // ——上半屏虚线框、下半屏转圈。加载中这两个都必须藏掉。
+  resultBody.classList.add("is-hidden");
+  emptyHint.classList.add("is-hidden");
+  loadingBox.classList.remove("is-hidden");
   $("pStage").textContent = stage;
   errBox.classList.remove("on");
   cancelBtn.hidden = !cancellable;
+  genBtn.hidden = true;                 // 位置让给"停止生成"
 }
 
 const PROG_DESC = {
@@ -852,6 +1020,7 @@ function resetSteps() {
 
 function startElapsed() {
   genAnim.on = true; genAnim.level = 0.5; genAnim.progress = 0;
+  buildGenBars(); paintGenProgress(0);
   cancelAnimationFrame(waveRAF);
   waveRAF = requestAnimationFrame(waveLoop);
   clearInterval(elapsedTimer);
@@ -866,10 +1035,12 @@ function stopUi() {
   waveRAF = 0;
   genAnim.on = false;
   cancelBtn.hidden = true;
+  genBtn.hidden = false;
   curJobId = "";
   curJobState = "";
   curAbort = null;
   drawHeaderWave(0);
+  paintGenProgress(0);
 }
 
 function updateCancelUi() {
@@ -890,7 +1061,7 @@ function updateCancelUi() {
 }function showError(msg) {
   errBox.textContent = msg;
   errBox.classList.add("on");
-  loadingBox.hidden = true;
+  loadingBox.classList.add("is-hidden");
   setResultVisible(hasResult);
   stopUi();
 }
@@ -1076,6 +1247,7 @@ genBtn.addEventListener("click", async () => {
           showLoading(transDesc(ev.desc) || "正在生成语音…");
           genAnim.level = Math.min(1, 0.4 + (ev.value || 0));
           genAnim.progress = ev.value || 0;
+          paintGenProgress(ev.value);
           $("pbarFill").style.width = `${Math.round((ev.value || 0) * 100)}%`;
           // s2mel 阶段优先显示扩散步数，其余阶段显示全局百分比
           const mDiff = /\|s2mel\|(\d+)\/(\d+)/.exec(String(ev.desc || ""));
@@ -1085,7 +1257,7 @@ genBtn.addEventListener("click", async () => {
         } else if (ev.type === "done") {
           for (let i = 0; i < 5; i++) markStep(i, "done");
           $("pbarFill").style.width = "100%";
-          loadingBox.hidden = true;
+          loadingBox.classList.add("is-hidden");
           stopUi();
           histCurId = ev.history_id || "";
           await loadResult(ev.wav, ev.elapsed, ev.file, { melCapped: ev.mel_capped });
@@ -1113,6 +1285,46 @@ const trim = { buffer: null, sel: null, drag: null };
 const tWave = $("waveTrim"), tCtx = tWave.getContext("2d");
 const player = $("player");
 const bigPlay = $("bigPlay"), bigPlayIcon = $("bigPlayIcon");
+
+/* ---- 音量控制：原生 controls 被隐藏了，音量得自己管，值存 localStorage ---- */
+const volRange = $("volRange"), volMute = $("volMute"), volIcon = $("volIcon");
+const VOL_KEY = "player.volume";
+const VOL_SVG = {
+  high: '<path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>',
+  low:  '<path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/>',
+  off:  '<path d="M11 5 6 9H2v6h4l5 4V5z"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/>',
+};
+function renderVolume() {
+  sliderFill(volRange);
+  const silent = player.muted || player.volume === 0;
+  volIcon.innerHTML = silent ? VOL_SVG.off : (player.volume < 0.5 ? VOL_SVG.low : VOL_SVG.high);
+  volMute.classList.toggle("off", silent);
+  volMute.title = player.muted ? "取消静音" : "静音";
+}
+volRange.addEventListener("input", () => {
+  const v = Number(volRange.value);
+  player.volume = v;
+  player.muted = v === 0;
+  try { localStorage.setItem(VOL_KEY, String(v)); } catch (e) {}
+  renderVolume();
+});
+volMute.addEventListener("click", () => {
+  player.muted = !player.muted;
+  // 从静音恢复时，如果音量本来就是 0，给回一个能听见的默认值
+  if (!player.muted && player.volume === 0) { player.volume = 0.7; volRange.value = "0.7"; }
+  try { localStorage.setItem(VOL_KEY, String(player.volume)); } catch (e) {}
+  renderVolume();
+});
+(function initVolume() {
+  let v = 1;
+  try {
+    const saved = localStorage.getItem(VOL_KEY);
+    if (saved !== null) { const n = parseFloat(saved); if (isFinite(n) && n >= 0 && n <= 1) v = n; }
+  } catch (e) {}
+  player.volume = v;
+  volRange.value = String(v);
+  renderVolume();
+})();
 const PLAY2 = '<path d="M8 5v14l11-7z"/>';
 const PAUSE2 = '<path d="M6 5h4v14H6zM14 5h4v14h-4z"/>';
 let curUrl = null;
@@ -1124,7 +1336,7 @@ async function loadResult(url, elapsed, serverFile, opts) {
   curUrl = url;
   // 下载名与服务端 outputs/ 里的实际文件一致；文本改动不再影响已生成的结果名
   curServerFile = serverFile || (url || "").split("/").pop() || "";
-  loadingBox.hidden = true;
+  loadingBox.classList.add("is-hidden");
   setResultVisible(true);
   clearActionError();
   player.src = url;
@@ -1366,6 +1578,24 @@ $("libFold").addEventListener("click", () => {
 });
 libSetFolded(localStorage.getItem(LIB_FOLD_KEY) === "1", false);
 
+/* 情感控制的展开状态。它是使用频率最高的面板（切情感模式、调情感权重、
+   传情感参考音频都在这里），所以默认展开 —— open 同时写在 HTML 标签上，
+   首屏就是展开的，不会先收起再弹开。
+   但用户若手动收起，得记住，否则每次刷新都弹回来反而碍事。 */
+const EMO_FOLD_KEY = "emoFoldOpen";
+const emoFoldEl = $("emoFold");
+if (emoFoldEl) {
+  emoFoldEl.addEventListener("toggle", () => {
+    try { localStorage.setItem(EMO_FOLD_KEY, emoFoldEl.open ? "1" : "0"); } catch (e) {}
+  });
+  try {
+    // 只有明确记过"收起"才收起；没有记录就保持 HTML 里的默认展开。
+    // 这里早于下面给 details.fold 挂 toggle 的那段代码，所以不会触发
+    // "展开后自动滚进可视区"的逻辑。
+    if (localStorage.getItem(EMO_FOLD_KEY) === "0") emoFoldEl.open = false;
+  } catch (e) {}
+}
+
 /* shared: apply a preset by name; returns success */
 async function applyPresetByName(name) {
   try {
@@ -1451,9 +1681,10 @@ function renderLib() {
           await pmPresetAction(name, btn.dataset.act);
         });
       });
-      row.querySelector(".pm-del").addEventListener("click", async (e) => {
+      row.querySelector(".pm-del").addEventListener("click", (e) => {
         e.stopPropagation();
-        await pmPresetAction(name, "delete");
+        // 二次确认交给按钮本身：第一次点变红打勾，2.6 秒内再点才真删
+        armConfirm(e.currentTarget, () => pmPresetAction(name, "delete"));
       });
       box.appendChild(row);
     }
@@ -1630,14 +1861,17 @@ function renderHistory() {
       renderHistory();
       await loadResult(it.url, it.elapsed, it.file);
     });
-    del.addEventListener("click", async (e) => {
+    // 同一个 ✕ 图标，和预设删除保持一致的"点两次"手势
+    del.addEventListener("click", (e) => {
       e.stopPropagation();
-      try {
-        const r = await fetch(`${API}/history/` + encodeURIComponent(it.id), { method: "DELETE" });
-        if (!r.ok) throw new Error("删除失败");
-        if (histCurId === it.id) histCurId = "";
-        await refreshHistory();
-      } catch (err) { showActionError("删除历史失败: " + err.message); }
+      armConfirm(del, async () => {
+        try {
+          const r = await fetch(`${API}/history/` + encodeURIComponent(it.id), { method: "DELETE" });
+          if (!r.ok) throw new Error("删除失败");
+          if (histCurId === it.id) histCurId = "";
+          await refreshHistory();
+        } catch (err) { showActionError("删除历史失败: " + err.message); }
+      });
     });
     box.appendChild(row);
   }
@@ -1890,7 +2124,7 @@ async function pmPresetAction(name, act) {
       const j = await r.json();
       pmFlash(`已复制为: ${j.name}`);
     } else if (act === "delete") {
-      if (!await uiConfirm({ title: "删除预设", body: `确定删除预设「${name}」？此操作不可恢复。`, okText: "删除", danger: true })) return;
+      // 二次确认已经在删除按钮上完成了（见 armConfirm），这里直接执行
       const r = await fetch(`${API}/presets/` + encodeURIComponent(name), { method: "DELETE" });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "删除失败");
       presetDetailCache.delete(name);

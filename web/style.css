@@ -1,22 +1,31 @@
 /* IndexTTS2 Studio — console theme, light/dark (based on Qwen3 TTS Studio look) */
+/* 配色：暖中性（warm neutral / greige）极简主题。主色由原来的大红改为深灰，
+   强调色（focus 环 / 开关 / 滑块 / 波形）同样走中性灰，整个界面不含高饱和彩色，
+   只在状态提示上保留语义色（ok 绿 / warn 琥珀 / danger 红）。
+   颜色统一写成 oklch()，现代浏览器原生支持；微调就改 L/C/H 三个分量（L=亮度 C=彩度 H=色相）。
+   想加回暖色点缀：把下面两处 --accent 改成 oklch(0.6863 0.1743 34.2614)（赤陶橙，但偏红）。
+   想回到旧配色：--primary 用 #d2372e、--accent 用 #1f5fe0。 */
 :root {
-  --bg: #f2f1ee;
-  --surface: #ffffff;
-  --surface-2: #f7f6f3;
-  --ink: #1b1a18;
-  --muted: #6f6a62;
-  --faint: #a09a90;
-  --border: #e3e0da;
-  --primary: #d2372e;
-  --primary-ink: #ffffff;
+  --bg: oklch(0.9195 0.0169 88.0030);
+  --surface: oklch(0.9530 0.0156 86.4257);
+  --surface-2: oklch(0.8647 0.0201 87.5232);
+  --ink: oklch(0.2350 0 0);
+  --muted: oklch(0.4688 0.0136 84.5932);
+  --faint: oklch(0.6320 0.0120 84.0000);
+  --border: oklch(0.8434 0.0231 87.1621);
+  --primary: oklch(0.3012 0 0);
+  --primary-ink: oklch(0.9169 0.0175 99.6160);
   /* --danger：错误/删除/警告徽章专用，与品牌主色 --primary 解耦——
-     主按钮红与"危险操作红"可以独立调整，不再同源 */
-  --danger: #d5333a;
-  --accent: #1f5fe0;
-  --ok: #1e9e5a;
-  --warn: #c07d10;
-  --meter-track: #eceae5;
-  --shadow: 0 1px 2px rgba(27, 26, 24, .06), 0 8px 24px rgba(27, 26, 24, .07);
+     主按钮色与"危险操作红"可以独立调整，不再同源 */
+  --danger: oklch(0.5492 0.1942 26.4567);      /* = #ca2c2c */
+  --accent: oklch(0.4500 0 0);
+  --ok: oklch(0.5800 0.1350 152.0000);
+  --warn: oklch(0.6400 0.1300 72.0000);
+  /* 滑块槽。原来是 0.8340，而 .fold 面板是 0.8647 —— 只差 0.03，
+     槽几乎看不见，滑块像浮在半空。压深到 0.78 才有一段"槽"的样子。
+     进度条、音量条也都共用这个变量。 */
+  --meter-track: oklch(0.7800 0.0232 87.1630);
+  --shadow: 0px 4px 10px 0px hsl(0 0% 0% / .10), 0px 2px 4px -1px hsl(0 0% 0% / .10);
   --radius: 14px;
   --pad: 20px;
   --gap: 16px;
@@ -25,21 +34,22 @@
   --sans: "Segoe UI", system-ui, -apple-system, "Microsoft YaHei", "PingFang SC", sans-serif;
 }
 html[data-theme="dark"] {
-  --bg: #131211;
-  --surface: #1c1b19;
-  --surface-2: #232120;
-  --ink: #edeae4;
-  --muted: #9a948b;
-  --faint: #6d6862;
-  --border: #2e2c29;
-  --primary: #e5503f;
-  --primary-ink: #ffffff;
-  --danger: #f2555a;
-  --accent: #7ca1f2;
-  --ok: #4cc38a;
-  --warn: #e0a437;
-  --meter-track: #2a2826;
-  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 28px rgba(0, 0, 0, .45);
+  --bg: oklch(0.1913 0 0);
+  --surface: oklch(0.2264 0 0);
+  --surface-2: oklch(0.2520 0 0);
+  --ink: oklch(0.9173 0.0133 82.4015);
+  --muted: oklch(0.6348 0.0113 81.7875);
+  --faint: oklch(0.4450 0.0080 83.0000);
+  --border: oklch(0.2931 0 0);
+  --primary: oklch(0.8520 0.0205 100.6306);
+  --primary-ink: oklch(0.3329 0 0);
+  --danger: oklch(0.6100 0.1900 26.4567);      /* 同色相提亮，深底才读得清 */
+  --accent: oklch(0.6500 0.0100 90.0000);
+  --ok: oklch(0.7200 0.1400 152.0000);
+  --warn: oklch(0.7800 0.1350 78.0000);
+  /* 深色下方向相反：面板是 0.2520，槽得比它更亮才看得见 */
+  --meter-track: oklch(0.3450 0 0);
+  --shadow: 0px 6px 15px 0px hsl(0 0% 0% / .30), 0px 4px 6px -1px hsl(0 0% 0% / .30);
 }
 
 * { box-sizing: border-box; }
@@ -47,11 +57,14 @@ html[data-theme="dark"] {
 html, body { margin: 0; padding: 0; }
 
 /* ---------- themed scrollbars (thin, follow light/dark) ---------- */
-* { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--faint) 65%, transparent) transparent; }
-::-webkit-scrollbar { width: 8px; height: 8px; }
+/* 滚动条滑块原来用 --faint（很浅的灰）再叠 65% 透明，在米色底上基本看不见，
+   于是"还能往下滚"这个信息传达不出去，内容看着就像被裁掉了。
+   换成 --muted 并提高不透明度，滚动条成为可见的提示。 */
+* { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--muted) 55%, transparent) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--faint) 60%, transparent);
+  background: color-mix(in srgb, var(--muted) 50%, transparent);
   border-radius: 999px;
   border: 2px solid transparent;
   background-clip: padding-box;
@@ -102,7 +115,9 @@ header {
 
 /* ---------- two-column layout ---------- */
 main {
-  width: 100%; max-width: 1440px; margin: 0 auto; padding: var(--gap) 24px 48px;
+  /* 底部留白：48px → 16px。原来的 48px 再叠加 footer 的 30px，
+     在 1440p 屏上白白吃掉近 80px 可用高度 */
+  width: 100%; max-width: 1440px; margin: 0 auto; padding: var(--gap) 24px 16px;
   display: grid; grid-template-columns: minmax(360px, 470px) minmax(0, 1fr);
   gap: var(--gap); align-items: stretch; flex: 1;
 }
@@ -136,19 +151,95 @@ main {
 .grow textarea { flex: 1; }
 .opfoot { display: flex; justify-content: space-between; gap: 10px; margin-top: 7px; font-size: 11.5px; color: var(--faint); }
 
+/* 表单控件必须能从它所在的面板里"跳出来"。
+   原先描边用 --border（0.8434），而 .fold 面板底色是 --surface-2（0.8647）——
+   两者只差 0.02，边界基本看不出。这里换成半透明墨色描边：
+   亮色主题下 --ink 是深色，描边是暗线；深色主题下 --ink 变亮，描边自动变浅线，
+   一个写法两边通吃，不用维护两套。 */
 textarea, select, input[type="text"], input[type="number"] {
-  width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
-  background: var(--surface-2); color: var(--ink); font-family: var(--sans); font-size: 14.5px;
-  transition: border-color .18s ease, box-shadow .18s ease;
+  width: 100%; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--ink) 16%, transparent);
+  background-color: var(--surface-2); color: var(--ink);
+  font-family: var(--sans); font-size: 14.5px;
+  transition: border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
 }
+/* 落在 .fold 面板里的控件：面板本身就是 --surface-2，控件再用同一个颜色
+   就完全糊在一起了。这里统一提到 --surface，并补一层极轻的内阴影做出"凹"感。 */
+.fold textarea, .fold select, .fold input[type="text"], .fold input[type="number"] {
+  /* 这里必须用 background-color 而不是 background 简写：
+     select 的箭头在后面的 `select { background-image: ... }` 里定义，
+     简写会先把 background-image 清成 none，两条规则合并时计算结果不可靠
+     （实测暗色下仍解析成亮色的 --surface）。只设背景色就互不干扰。 */
+  background-color: var(--surface);
+  border-color: color-mix(in srgb, var(--ink) 20%, transparent);
+  box-shadow: inset 0 1px 2px color-mix(in srgb, var(--ink) 7%, transparent);
+}
+/* 原生勾选框跟随主题着色。不写这条时浏览器用自带蓝，与整套配色脱节
+   （do_sample 那个勾选框就是漏网的一个） */
+input[type="checkbox"], input[type="radio"], progress { accent-color: var(--primary); }
+/* 下拉框。这里用 appearance: base-select 而不是传统的 none —— 它是
+   让 ::picker(select)（弹出列表）和 ::picker-icon（箭头）可样式化的前提。
+   浏览器原生的弹出列表是个直角矩形，和这套圆角语言格格不入，只有
+   base-select 才能给它加圆角。整站只有 #emoMode 一个 select，影响面很小。
+   注意：base-select 下箭头由 ::picker-icon 渲染，必须撤掉原来用
+   background-image 画的那个，否则会画出两个箭头。 */
 select {
-  appearance: none; -webkit-appearance: none; cursor: pointer;
-  padding: 11px 38px 11px 13px;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a09a90' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>");
-  background-repeat: no-repeat; background-position: right 13px center; background-size: 13px;
+  appearance: base-select; -webkit-appearance: base-select; cursor: pointer;
+  background-image: none;
+  padding: 11px 13px;
+  display: flex; align-items: center; gap: 10px;
+  text-align: left;
 }
-html[data-theme="dark"] select {
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236d6862' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='m6 9 6 6 6-6'/></svg>");
+/* 触发器里的箭头。base-select 用 currentColor 绘制，跟随主题色；
+   margin-left: auto 把它推到最右端，展开时翻转 180°。 */
+select::picker-icon {
+  color: var(--faint); font-size: 13px; line-height: 1;
+  margin-left: auto; flex: none;
+  transition: rotate .18s ease, color .18s ease;
+}
+select:hover::picker-icon { color: var(--muted); }
+select:open::picker-icon { rotate: 180deg; }
+/* 弹出列表容器：圆角是这次改动的目的。顺带统一边框、底色和投影，
+   让它看起来是从面板里"长"出来的一层，而不是系统控件的方盒子。 */
+::picker(select) {
+  appearance: base-select;
+  /* 弹层自身必须显式给 color。它脱离普通继承链，不写就会用浏览器默认的黑，
+     暗色主题下就成了黑字压深底，整列选项读不出来。 */
+  color: var(--ink);
+  /* base-select 之后弹层改用 CSS 锚点定位，默认带自动翻转（下方放不下就翻到
+     上方）。只关掉 fallback，不覆盖 position-area —— 覆盖它会连默认的水平
+     对齐（block-end span-inline-end）一起丢掉，弹层就不再和控件左对齐了。 */
+  position-try-fallbacks: none;
+  margin-top: 6px; padding: 5px;
+  border: 1px solid color-mix(in srgb, var(--ink) 16%, transparent);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 8px 24px hsl(0 0% 0% / .13), 0 2px 6px hsl(0 0% 0% / .08);
+  animation: picker-in .14s ease-out;
+}
+@keyframes picker-in {
+  from { opacity: 0; translate: 0 -4px; }
+  to   { opacity: 1; translate: 0 0; }
+}
+/* 每个选项。圆角 + 内边距，让高亮块不再是顶着边的整行色条。 */
+option {
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  /* 同 ::picker(select)：option 也不走普通继承，必须显式给文字色，
+     否则暗色主题下会回落到黑字。 */
+  color: var(--ink);
+  transition: background-color .12s ease;
+}
+option:hover { background-color: color-mix(in srgb, var(--ink) 7%, var(--surface)); }
+option:checked {
+  background-color: color-mix(in srgb, var(--accent) 13%, var(--surface));
+  color: var(--ink);
+  font-weight: 600;
+}
+@media (prefers-reduced-motion: reduce) {
+  ::picker(select) { animation: none; }
+  select::picker-icon { transition: none; }
 }
 textarea { resize: none; overflow: hidden; min-height: 96px; max-height: 40vh; }
 /* 合成文本框：固定高度 + 内部滚动，页面高度不随文本增长，长文本可滚动查看 */
@@ -177,13 +268,23 @@ textarea:focus, select:focus, input:focus {
 .seg-tok { font-family: var(--mono); font-size: 10.5px; color: var(--faint); flex: none; }
 
 /* ---------- drop / reference ---------- */
+/* 上传区。原来没有底色（直接露卡片）、虚线又用 --border，
+   结果整块区域的边界几乎看不出来 —— 给个底色 + 加实虚线，边界就立起来了。
+   底色用 --surface-2：它在卡片（--surface）里显得深、在 .fold 面板
+   （--surface-2）里再由下面那条规则提亮，两种上下文都分得清。 */
 .drop {
-  border: 1.5px dashed var(--border); border-radius: 12px; padding: 16px 12px 13px;
+  border: 1.5px dashed color-mix(in srgb, var(--ink) 26%, transparent);
+  border-radius: 12px; padding: 16px 12px 13px;
+  background-color: var(--surface-2);
   display: flex; flex-direction: column; align-items: center; gap: 3px;
   text-align: center; color: var(--faint); cursor: pointer;
   transition: border-color .18s ease, background .18s ease;
 }
-.drop:hover, .drop.over { border-color: var(--accent); background: var(--surface-2); }
+.fold .drop { background-color: var(--surface); }
+.drop:hover, .drop.over {
+  border-color: var(--accent);
+  background-color: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
 .drop input { display: none; }
 .drop-ic { color: var(--faint); margin-bottom: 3px; }
 .drop-main { font-size: 13px; color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -204,9 +305,33 @@ textarea:focus, select:focus, input:focus {
 .ref-change { flex: none; }
 
 /* ---------- fold (details) ---------- */
-.fold { margin-top: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); }
+/* 折叠面板：左右内边距必须写在容器上。原先只有 summary 带 padding，
+   导致面板里的滑块/下拉框/选项全部贴在边框上（零间距）。
+   底部内边距只在展开时给，否则折叠态会多出一条空白。 */
+/* 左栏的"必要 / 可选"分界：上面是 1、2 两个必填步骤，下面是可选项。
+   加这条线是为了让"下面那些到底要不要填"不再需要用户去猜。 */
+.opt-divider {
+  display: flex; align-items: center; gap: 10px;
+  /* 行高必须是奇数。::after 那 1px 的线靠 align-items:center 垂直居中，
+     居中偏移 = (行高 - 1) / 2。行高若跟着 font-size 走 1.55 倍，会得到
+     17.825px 这种小数，偏移就是 8.4125px —— 1px 的线正好落在两个物理像素
+     之间，被抗锯齿分摊成两个半透明的像素，看着又细又淡；舍入方向一变就落回
+     单个像素，看着又"变粗"（Ctrl+F5 后字体与内容稳定时会触发这个变化）。
+     17px 是奇数，(17 - 1) / 2 = 8，线落在整数像素边界上，粗细就稳定了。 */
+  line-height: 17px;
+  margin: 20px 0 4px; color: var(--faint);
+  font-size: 11.5px; letter-spacing: .02em;
+}
+.opt-divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+.fold {
+  margin-top: 10px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-2);
+  padding: 0 12px;
+}
+.fold[open] { padding-bottom: 12px; }
 .fold summary {
-  cursor: pointer; padding: 8px 12px; font-size: 12.5px; font-weight: 600;
+  cursor: pointer; padding: 8px 0; font-size: 12.5px; font-weight: 600;
   color: var(--muted); list-style: none; display: flex; align-items: center; gap: 8px; user-select: none;
 }
 .fold summary::before { content: "▸"; font-size: 11px; transition: transform .18s ease; }
@@ -234,17 +359,22 @@ textarea:focus, select:focus, input:focus {
 .slider label { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 600; }
 .slider label span { color: var(--faint); font-weight: 400; font-family: var(--mono); font-size: 11.5px; }
 .srow { display: flex; align-items: center; gap: 12px; margin-top: 5px; }
-.srow input[type="range"] {
-  flex: 1; appearance: none; -webkit-appearance: none; height: 5px; border-radius: 3px;
+/* 滑块统一外观。必须同时覆盖 .srow（参数滑块）和 .vec-row（情感向量 8 轴，
+   由 app.js 动态生成）——原先只写了 .srow，导致情感向量的滑块退回浏览器默认蓝。 */
+.srow input[type="range"],
+.vec-row input[type="range"] {
+  flex: 1; width: 100%; appearance: none; -webkit-appearance: none; height: 5px; border-radius: 3px;
   background: linear-gradient(90deg, var(--accent) var(--fill, 50%), var(--meter-track) var(--fill, 50%));
   cursor: pointer; padding: 0; border: none; font: inherit;
 }
-.srow input[type="range"]::-webkit-slider-thumb {
+.srow input[type="range"]::-webkit-slider-thumb,
+.vec-row input[type="range"]::-webkit-slider-thumb {
   appearance: none; -webkit-appearance: none;
   width: 15px; height: 15px; border-radius: 50%; background: var(--surface);
   border: 2px solid var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: transform .15s ease;
 }
-.srow input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.15); }
+.srow input[type="range"]:active::-webkit-slider-thumb,
+.vec-row input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.15); }
 .srow output { font-family: var(--mono); font-size: 12px; color: var(--ink); min-width: 42px; text-align: right; font-weight: 600; }
 .grid-num { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
 .grid-num label { display: flex; justify-content: space-between; gap: 6px; font-size: 12px; font-weight: 600; }
@@ -253,7 +383,10 @@ textarea:focus, select:focus, input:focus {
 .chk span { color: var(--faint); font-weight: 400; font-family: var(--mono); font-size: 11px; }
 
 /* ---------- emotion extras ---------- */
+/* 情感参考的试听条：与音色参考共用 .refrow，只是不带波形。
+   它紧跟在 .drop.slim 下面，给一点上边距免得贴太紧。 */
 .emo-box { margin-top: 10px; }
+.emo-box .refrow { margin-top: 8px; }
 .emo-box .hint-line { font-size: 11.5px; color: var(--warn); margin-top: 5px; }
 .vec-chips { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-bottom: 8px; }
 .vec-chips-label { font-size: 11.5px; color: var(--faint); }
@@ -291,9 +424,9 @@ textarea:focus, select:focus, input:focus {
   font-family: var(--mono); font-size: 11.5px; line-height: 1.6; color: var(--muted);
   white-space: pre-wrap; word-break: break-all; max-height: 170px; overflow-y: auto;
 }
-.gl-add { display: grid; grid-template-columns: 1.3fr 1fr 1fr auto; gap: 8px; margin: 10px 12px 0; }
+.gl-add { display: grid; grid-template-columns: 1.3fr 1fr 1fr auto; gap: 8px; margin: 10px 0 0; }
 .gl-add input { font-size: 13px; padding: 8px 10px; }
-.gl-table { margin: 8px 12px 4px; display: flex; flex-direction: column; gap: 4px; }
+.gl-table { margin: 8px 0 4px; display: flex; flex-direction: column; gap: 4px; }
 .gl-row {
   display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 8px; font-size: 12px;
   padding: 6px 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
@@ -306,15 +439,19 @@ textarea:focus, select:focus, input:focus {
 
 /* ---------- main CTA ---------- */
 .cta {
-  position: sticky; bottom: 0; z-index: 3; margin-top: auto;
-  margin-left: calc(-1 * var(--pad)); margin-right: calc(-1 * var(--pad));
-  /* 不再用负 margin 吃掉卡片底 padding：负值会让 ops 的可滚动高度
-     天生比可视区少 --pad，左栏最后一个折叠面板的底部永远差一点才能滚上来 */
-  padding: 14px var(--pad) calc(var(--pad) + 3px);
-  background: color-mix(in srgb, var(--surface) 94%, transparent);
-  border-top: 1px solid var(--border);
-  backdrop-filter: blur(8px);
+  /* 原来在左侧参数栏贴底悬浮，靠 sticky + 投影避免内容从下面透出来。
+     搬到结果区下方后这些都不需要了：它紧跟在结果与进度正下方，
+     点完按钮抬眼就能看到进度，视线不用横跨两栏。
+     这一带的功能是"结果看完 → 立刻点生成"，中间不该有可观留白，
+     所以 margin-top 一路收到 2px、上下内边距从 14px 收到 11px，
+     让按钮尽量贴着结果区上沿。 */
+  margin-top: 2px;
+  padding: 11px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
 }
+
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   border: none; border-radius: 12px; padding: 11px 20px; font-size: 15px; font-weight: 700;
@@ -325,8 +462,13 @@ textarea:focus, select:focus, input:focus {
 .btn.primary { background: var(--primary); color: var(--primary-ink); }
 .btn.primary:hover { filter: brightness(1.08); box-shadow: 0 6px 18px color-mix(in srgb, var(--primary) 35%, transparent); }
 .btn.primary:disabled { opacity: .45; cursor: not-allowed; filter: none; box-shadow: none; }
-.btn.primary.big {
+/* "大按钮"尺寸对所有主操作按钮通用 —— 不能只挂在 .primary 上。
+   因为"停止生成"是 danger 色的，但它必须和"生成语音"一样高一样宽，
+   否则生成中 ↔ 生成后切换时按钮会突然变矮一截。 */
+.btn.big {
   width: 100%; padding: 17px 22px; font-size: 17px; letter-spacing: .06em;
+}
+.btn.primary.big {
   box-shadow: 0 8px 22px color-mix(in srgb, var(--primary) 30%, transparent);
 }
 .btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--border); font-weight: 600; }
@@ -340,6 +482,13 @@ textarea:focus, select:focus, input:focus {
 .btn.ghost.mini { padding: 8px 13px; font-size: 12.5px; border-radius: 9px; flex: none; }
 .hint { font-size: 11.5px; color: var(--faint); min-height: 15px; text-align: center; margin-top: 7px; }
 .hint.error { color: var(--danger); }
+/* 空态的提示行不该占位。
+   .hint 的 min-height: 15px + margin-top: 7px 本意是让提示出现时少跳一点，
+   但这一行平时始终是空的（只在操作提示 / 报错时才写入文字），
+   于是它和白占的 22px 一起把"生成按钮 → 预设面板"的间距顶到 46px。
+   app.js 清空用的是 textContent = ""，元素是真的空，所以 :empty 能匹配到；
+   一旦写入文字 :empty 立刻失效，提示照常显示。 */
+.cta .hint:empty { display: none; }
 
 /* ---------- GLOSSARY ---------- */
 .gl-error {
@@ -351,10 +500,41 @@ textarea:focus, select:focus, input:focus {
 
 /* ---------- RIGHT: result showcase ---------- */
 .resultcard { min-height: 520px; }
+
+/* ---------- 主视觉区：空状态 / 生成中 / 结果三态共用同一格 ----------
+   三个状态块都放进 grid-area 1/1，也就是"叠罗汉"。
+   好处：容器高度 = 三者中的最大值，永远恒定，切换时零位移。
+   注意：隐藏态必须用 visibility 而不是 display:none —— display:none 的
+   元素不参与布局，那样高度就又跟着当前状态变了，白折腾。 */
+.stage {
+  /* 这里刻意不用 flex:1。flex:1 会让它一路撑到卡片底部，而卡片本身会被
+     右侧的"生成历史"列表拉得很高（历史越多越高），结果生成按钮就被一路
+     顶到卡片最下面，离结果内容远远的。改成按内容高度（不低于 340px）之后，
+     按钮稳稳跟在结果区下方，三态位置一致，也不会随历史条数漂移。 */
+  flex: none;
+  display: grid;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+  min-height: 340px;
+}
+.stage > * {
+  grid-area: 1 / 1;
+  min-width: 0;
+  opacity: 1;
+  transition: opacity .24s ease;
+}
+/* 从 display:none 首次出现时，让浏览器从 opacity:0 开始过渡（淡入） */
+@starting-style {
+  .stage > * { opacity: 0; }
+}
+.stage > .is-hidden {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
 .ph {
-  flex: 1; border: 1.5px dashed var(--border); border-radius: 14px;
+  border: 1.5px dashed var(--border); border-radius: 14px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 16px; padding: 48px 24px; min-height: 360px; margin-bottom: 6px;
+  gap: 16px; padding: 48px 24px;
   background:
     radial-gradient(220px 150px at 50% 46%, color-mix(in srgb, var(--accent) 5%, transparent), transparent);
 }
@@ -376,14 +556,61 @@ textarea:focus, select:focus, input:focus {
 .ph-est { font-size: 12px; color: var(--faint); }
 
 /* loading */
-.sc-loading { flex: 1; display: flex; align-items: center; justify-content: center; gap: 22px; padding: 40px 0; flex-wrap: wrap; min-height: 280px; }
-.spinner {
-  width: 68px; height: 68px; border-radius: 50%; flex: none;
-  border: 6px solid var(--meter-track); border-top-color: var(--primary);
-  animation: spin 1s linear infinite;
+.sc-loading {
+  /* 纵向排列：上面是波浪动画（占的就是结果态波形的位置），下面是进度信息。
+     不再用转圈 —— 波浪本身就在动，已经足够表达"正在生成"，
+     而且它和结果态的波形同位置同尺寸，切换时是"波浪长成波形"。 */
+  display: flex; flex-direction: column; gap: 0;
+  padding: 0;
 }
+/* 生成中的推理动画：一排缓慢起伏的柱子。尺寸刻意和 #waveTrim 一致
+   （整宽 × 108px），所以切换时这块区域纹丝不动。
+   重点在"慢"—— 上一版是 canvas 逐帧重绘的高频正弦（周期约 130ms，
+   被 Math.abs 翻倍后接近 15Hz），盯一会儿眼睛就受不了。
+   这里每根柱子周期 0.5~1.2s、ease-in-out、各自随机延迟，像呼吸而非频闪；
+   动画全部交给 CSS/GPU 合成，主线程一点不占。 */
+.genwave {
+  position: relative;
+  width: 100%; height: 108px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 8px; background: var(--surface-2);
+  overflow: hidden;
+}
+/* 中线：给波形一个落点，柱子最短时也不会显得浮在空中 */
+.genwave-baseline {
+  position: absolute; width: 86%; height: 2px; border-radius: 2px;
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
+}
+.genwave-bars {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 86%; height: 76px;
+}
+.genwave-bars i {
+  width: 4px; height: 100%; border-radius: 4px;
+  transform-origin: center;
+  transform: scaleY(0.1);
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--accent) 55%, var(--surface-2)), var(--accent));
+  will-change: transform;
+  animation: genwave-pulse var(--d) ease-in-out infinite alternate;
+  animation-delay: var(--dl);
+}
+/* 已完成的那一段换成主色，进度一眼可见（和进度条同一套语义） */
+.genwave-bars i.done {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--primary) 55%, var(--surface-2)), var(--primary));
+}
+@keyframes genwave-pulse {
+  0%   { transform: scaleY(0.10); opacity: .45; }
+  100% { transform: scaleY(var(--s)); opacity: 1; }
+}
+/* 系统开了"减少动态效果"时，把周期再拉长一倍 */
+@media (prefers-reduced-motion: reduce) {
+  .genwave-bars i { animation-duration: 2.4s !important; }
+}
+
 @keyframes spin { to { transform: rotate(360deg); } }
-.sc-info { flex: 1 1 240px; max-width: 460px; }
+.sc-info { margin-top: 20px; min-width: 0; }
 .sc-stage { font-size: 15px; font-weight: 600; margin-bottom: 10px; }
 .pbar { height: 8px; border-radius: 4px; background: var(--meter-track); overflow: hidden; }
 .pbar i {
@@ -394,9 +621,15 @@ textarea:focus, select:focus, input:focus {
 .pmeta { display: flex; justify-content: space-between; gap: 12px; margin-top: 7px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
 .pmeta b { color: var(--ink); font-weight: 600; }
 .psteps { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
-/* 排队/生成中的取消按钮：弱化样式，不与进度信息抢焦点 */
-.cancelbtn { margin-top: 12px; align-self: flex-start; }
-.cancelbtn:disabled { opacity: .5; cursor: wait; }
+/* 停止生成：danger 色 + 全宽，就坐在"生成语音"原来的位置上。
+   两者互斥显示，所以视觉上是同一个按钮换了个身份，不会多出一块东西。 */
+.cta .cancelbtn {
+  width: 100%; margin-top: 0;
+  background: var(--danger); color: #fff;
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--danger) 28%, transparent);
+}
+.cta .cancelbtn:hover { background: var(--danger); filter: brightness(1.06); }
+.cta .cancelbtn:disabled { opacity: .6; cursor: wait; filter: none; }
 .pstep {
   font-family: var(--mono); font-size: 11px; color: var(--faint);
   padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2);
@@ -421,16 +654,36 @@ textarea:focus, select:focus, input:focus {
 .err.on { display: block; }
 
 /* big player */
-.bigplayer { display: flex; gap: 14px; align-items: stretch; }
+.bigplayer { display: flex; flex-direction: column; gap: 10px; }
+/* 波形下方那一行：播放按钮在左，时间信息占满剩余宽度 */
+.bp-bar { display: flex; align-items: center; gap: 14px; }
 .bigp {
-  width: 54px; height: 54px; border-radius: 50%; flex: none; align-self: center;
+  width: 54px; height: 54px; border-radius: 50%; flex: none;
   background: var(--primary); color: var(--primary-ink); border: none;
   box-shadow: 0 6px 18px color-mix(in srgb, var(--primary) 30%, transparent);
 }
 .bigp:hover { background: var(--primary); transform: translateY(-1px) scale(1.03); filter: brightness(1.06); }
 .bp-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 #waveTrim { width: 100%; height: 108px; display: block; border-radius: 8px; touch-action: none; cursor: crosshair; background: var(--surface-2); }
-.bp-meta { display: flex; justify-content: space-between; gap: 10px; margin-top: 7px; font-size: 12.5px; color: var(--muted); }
+.bp-meta { flex: 1; min-width: 0; display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; color: var(--muted); }
+/* 试听区的音量控制。原生 <audio controls> 被隐藏了（播放条由自定义波形担任），
+   音量调节也跟着一起没了，所以得自己补一个。滑块沿用参数区那套 --fill 渐变。 */
+.vol-ctl { display: flex; align-items: center; gap: 5px; flex: none; }
+.vol-ctl input[type="range"] {
+  width: 92px; appearance: none; -webkit-appearance: none;
+  height: 5px; border-radius: 3px; padding: 0; border: none; cursor: pointer;
+  background: linear-gradient(90deg, var(--accent) var(--fill, 100%), var(--meter-track) var(--fill, 100%));
+}
+.vol-ctl input[type="range"]::-webkit-slider-thumb {
+  appearance: none; -webkit-appearance: none;
+  width: 14px; height: 14px; border-radius: 50%; background: var(--surface);
+  border: 2px solid var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,.25);
+  transition: transform .15s ease;
+}
+.vol-ctl input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.15); }
+.vol-mute { width: 28px; height: 28px; border-radius: 8px; border: none; background: none; color: var(--faint); }
+.vol-mute:hover { color: var(--ink); background: var(--surface-2); }
+.vol-mute.off { opacity: .55; }
 .trim-hint { font-size: 12px; color: var(--faint); margin-top: 12px; }
 .result-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
 .result-actions .btn.primary { margin-left: auto; }
@@ -440,11 +693,24 @@ textarea:focus, select:focus, input:focus {
 /* ---------- result library (presets / examples tabs, bottom of right card) ---------- */
 .history {
   position: sticky; bottom: 0; z-index: 3;
-  margin: 16px calc(-1 * var(--pad)) calc(-1 * var(--pad));
+  /* 上边距只管留白，不再迁就左栏那条线的高度位置：
+     为了和 .opt-divider 的线"距上方元素一样远"曾把这里加到 28px，
+     但那等于凭空给中栏多塞 12px 空白，代价大于收益。
+     两条线仍是同色、同粗、同长、同缩进，视觉上成套就够了。 */
+  margin: 12px calc(-1 * var(--pad)) calc(-1 * var(--pad));
   padding: 10px var(--pad) 15px;
-  background: color-mix(in srgb, var(--surface) 94%, transparent);
-  border-top: 1px solid var(--border);
-  backdrop-filter: blur(8px);
+  /* 同 .cta：粘底元素用不透明底色，避免滚动内容从下面透出来 */
+  background: var(--surface);
+  /* 顶部分隔线改用伪元素画，不用 border-top：
+     border 只能画在盒子边界上，而这块面板为了粘底底色通栏用了负 margin，
+     于是它的 border-top 会比左栏"以下为可选设置"那条线各宽出 var(--pad)，
+     两条同类的分隔线看起来就不成套。改成绝对定位的伪元素之后，
+     底色照旧通栏、线却能收进 padding，和左栏那条对齐。 */
+  border-top: none;
+}
+.history::before {
+  content: ""; position: absolute; top: 0; height: 1px;
+  left: var(--pad); right: var(--pad); background: var(--border);
 }
 .lib-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
 /* 资源库折叠：收起时只留一行（按钮 + tabs），工具行与列表整体隐藏 */
@@ -453,8 +719,20 @@ textarea:focus, select:focus, input:focus {
 .history.lib-collapsed .lib-tools,
 .history.lib-collapsed .hist-list { display: none; }
 .history.lib-collapsed .lib-fold-btn svg { transform: rotate(-90deg); }
-.history.lib-collapsed { margin-top: 0; }
-.lib-tabs { display: flex; gap: 6px; }
+/* 这里原本还有一条 .history.lib-collapsed { margin-top: 0 }，已删除。
+   .history 的基础 margin-top 是 16px，收起时把它归零，会让整块面板在
+   收起的瞬间额外上蹿 16px、展开时又往下掉 16px —— 就是那种"弹一下"的
+   手感。收起只是内容变少，面板自身的位置不该跟着变，所以保持基础间距。 */
+/* 撑住这一行的高度，让收起/展开时它不变，避免"折叠按钮"和"预设/示例"
+   跟着上下挪 3px。原因：这一行的高度原本由最高的元素决定 ——
+   展开时工具行的搜索框（34px）最高，收起后它 display:none，只剩 tabs（28px），
+   行高从 34 掉到 28；而 .lib-head 的 align-items:center 会把子元素在新高度里
+   重新居中，于是整体偏移 (34-28)/2 = 3px。
+   注意不能改在 .lib-head 上加 min-height：那会影响整个 head（含换行后的第二行），
+   宽屏两行布局下反而把第一行从 28 撑到 34，制造反方向的位移。
+   这里让 tabs 自己恒为 34px（它是最高的常驻元素），行高就稳定了。
+   34px 与 .lib-tools 搜索框的高度配对，改动请同步。 */
+.lib-tabs { display: flex; align-items: center; gap: 6px; min-height: 34px; }
 .libtab {
   border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
   background: var(--surface-2); color: var(--muted);
@@ -464,9 +742,22 @@ textarea:focus, select:focus, input:focus {
 .libtab:hover { color: var(--ink); }
 .libtab.cur { color: var(--primary); background: color-mix(in srgb, var(--primary) 8%, var(--surface)); border-color: color-mix(in srgb, var(--primary) 35%, transparent); }
 .lib-tools { display: flex; gap: 8px; align-items: center; margin-left: auto; flex-wrap: wrap; }
-.lib-tools input[type="text"] { width: 140px; padding: 6px 10px; font-size: 12.5px; }
+/* 高度与 .lib-head 的 min-height 配对（都是 34px），改动请同步。 */
+.lib-tools input[type="text"] { width: 140px; height: 34px; padding: 6px 10px; font-size: 12.5px; }
 /* 库区卡片网格：一屏多列，预设多时定位快 */
-.hist-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 8px; max-height: 280px; overflow-y: auto; padding: 2px; }
+/* 资源库（预设 / 示例）列表。
+   原来的 max-height: 280px 是个写死的像素值，和卡片行高（约 85px）除不尽，
+   于是最后一行总被容器边界切掉半截 —— 看着像"内容丢了"，其实只是滚动区
+   开得太小。现在改成跟随视口的高度，常见窗口下能完整放下 5 行；
+   底部留 12px 呼吸空间，滚到底时最后一行是完整且不贴边的。 */
+.hist-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 8px;
+  max-height: min(48vh, 440px);
+  overflow-y: auto;
+  padding: 2px 2px 12px;
+  scroll-padding-block-end: 12px;
+  overscroll-behavior: contain;
+}
 .hist-item {
   position: relative; display: flex; flex-direction: column; gap: 5px;
   padding: 9px 11px; padding-right: 28px;
@@ -496,8 +787,13 @@ textarea:focus, select:focus, input:focus {
 .gen-summary {
   font-size: 11.5px; color: var(--faint); line-height: 1.6;
   padding: 6px 10px; border: 1px dashed var(--border); border-radius: 9px;
-  background: var(--surface-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  margin-bottom: 10px;
+  background: var(--surface-2);
+  /* 不再强制单行截断 —— 参数一多（top_k、预设名、情感权重）尾巴就被吃掉，
+     而这一行的作用恰恰是"让我确认参数对不对"，被截了就失去意义。
+     改成最多两行，再多才省略；完整内容放在 title 里悬停可见。 */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-bottom: 8px;
 }
 /* ---------- right sidebar: this-run generation history ---------- */
 .histbar { padding: 0; overflow: hidden; }
@@ -551,7 +847,7 @@ textarea:focus, select:focus, input:focus {
 .hb-rail-count { font-size: 10.5px; color: var(--faint); }
 
 /* ---------- footer & a11y ---------- */
-footer { max-width: 1440px; width: 100%; margin: 0 auto; padding: 0 24px 30px; color: var(--faint); font-size: 12px; }
+footer { max-width: 1440px; width: 100%; margin: 0 auto; padding: 0 24px 14px; color: var(--faint); font-size: 12px; text-align: center; }
 footer a { color: var(--muted); }
 
 /* ---------- modal dialog (replaces native confirm/prompt) ---------- */
@@ -608,11 +904,21 @@ main#pages { display: block; }
   .page { height: 100%; }
   .page:not([data-page="gen"]).cur { overflow-y: auto; }
   .ops, .resultcard, .histbar { overflow-y: auto; }
+  /* 应用式布局：页面本身不滚动，三栏各自内部滚动，
+     底部再留大片空白纯属浪费，这里再收紧一次 */
+  main#pages { padding-bottom: 8px; }
+  footer { padding: 0 24px 8px; font-size: 11.5px; }
 }
 
 /* ---------- header gauges (device / cpu / mem / gpu / vram) ---------- */
-.meters { display: flex; gap: 14px; margin-left: 12px; flex-wrap: nowrap; justify-content: flex-end; align-items: flex-start; }
-.meter { display: flex; flex-direction: column; gap: 4px; width: 86px; flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+.meters { display: flex; gap: 10px; margin-left: 12px; flex-wrap: nowrap; justify-content: flex-end; align-items: flex-start; }
+/* 宽度 96px 是实测值，不是随手取的：
+   四栏里最宽的是"内存 15.8/63.9G"，mono 10.5px 下标签 27.56 + 数值 61.52 = 89.08px，
+   加上 .meter > span 的 gap: 6px 共 95.09px。原来 width: 86px 差 9px，
+   数值末尾就被 b 的 text-overflow: ellipsis 吃掉一位（显示的"内存"看着像被截了尾巴）。
+   取 96px 留 1px 余量；多出来的宽度由顶栏那两个弹性元素（#waveHeader / .spacer）吸收，
+   顶栏不会因此换行。 */
+.meter { display: flex; flex-direction: column; gap: 4px; width: 96px; flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
 .meter > span {
   display: flex; justify-content: space-between; align-items: baseline; gap: 6px;
   white-space: nowrap; overflow: hidden; line-height: 16px; min-width: 0;
@@ -694,6 +1000,22 @@ main#pages { display: block; }
 .pm-card.cur { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 5%, var(--surface)); }
 .pm-name { font-size: 13.5px; font-weight: 700; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 26px; }
 .pm-meta { font-family: var(--mono); font-size: 10.5px; color: var(--faint); display: flex; flex-direction: column; gap: 2px; }
+/* 删除按钮的"待确认"态：第一次点之后变成这样，再点一次才真删。
+   红色实底 + "✓ 删除" + 一圈脉冲，和平时那个灰色 ✕ 一眼就能区分开。
+   宽度放开是为了容纳文字，因为锚在右上角，会向左扩展，不挤压别的元素。 */
+.pm-del.armed {
+  width: auto; min-width: 22px; padding: 0 7px;
+  white-space: nowrap;
+  opacity: 1;
+  color: #fff;
+  background: var(--danger);
+  animation: arm-pulse .9s ease-in-out infinite;
+}
+.pm-del.armed:hover { color: #fff; background: var(--danger); }
+@keyframes arm-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 26%, transparent); }
+  50%      { box-shadow: 0 0 0 6px color-mix(in srgb, var(--danger) 6%, transparent); }
+}
 .pm-del {
   position: absolute; top: 8px; right: 8px; width: 22px; height: 22px;
   border: none; border-radius: 6px; background: none; color: var(--faint);
@@ -730,7 +1052,7 @@ main#pages { display: block; }
   #waveHeader { display: none; }
   .spacer { display: none; }
   .meters { order: 3; margin-top: 2px; }
-  .meter { width: 84px; }
+  .meter { width: 96px; }   /* 同上：低于 96px 时"内存 15.8/63.9G"会被截 */
   #tabs { order: 4; margin-left: auto; }
   #themeBtn { order: 5; }
 }
@@ -749,20 +1071,20 @@ main#pages { display: block; }
   main#pages { padding-left: 14px; padding-right: 14px; }
   .hdr-row { padding: 8px 14px; gap: 8px 10px; }
   #waveHeader { display: none; }
-  footer { padding: 0 14px 24px; }
-  .bigplayer { flex-direction: column; align-items: stretch; }
-  .bigp { align-self: flex-start; }
+  footer { padding: 0 14px 16px; }
+  /* .bigplayer 现在是纵向布局，窄屏无需再改方向；.bigp 交给 .bp-bar 居中 */
   .gl-add { grid-template-columns: 1fr 1fr; }
   .gl-add button { grid-column: 1 / -1; }
 }
 @media (max-width: 480px) {
+  .vol-ctl input[type="range"] { width: 62px; }
   .brand small { display: none; }
   .pill { font-size: 11px; }
   .result-actions .btn { width: 100%; }
   .result-actions .btn.primary { margin-left: 0; }
   .grid-num { grid-template-columns: 1fr; }
   /* 极窄视口：仪表与 tabs 各占一行铺满；主题按钮浮到 header 右上角 */
-  .meter { width: 72px; }
+  .meter { width: 88px; }
   .meters { order: 3; width: 100%; justify-content: flex-start; margin-left: 0; }
   #tabs { order: 4; width: 100%; margin-left: 0; justify-content: flex-start; }
   .tab { flex: 1; padding: 6px 8px; }

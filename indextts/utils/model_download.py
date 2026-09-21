@@ -33,6 +33,37 @@ HF_TO_MODELSCOPE_REPO_MAP = {
 _BIGVGAN_REPO = "nvidia/bigvgan_v2_22khz_80band_256x"
 
 
+def _prune_sdk_scratch_file(scratch_path: str, local_path: str, local_dir: str) -> None:
+    """Drop the duplicate the ModelScope SDK leaves inside *local_dir*.
+
+    Only removes *scratch_path* when it is a real duplicate of *local_path*
+    living under *local_dir*, then removes directories it left empty. Never
+    touches the file the caller just handed back.
+    """
+    try:
+        scratch = os.path.abspath(scratch_path)
+        keep = os.path.abspath(local_path)
+        root = os.path.abspath(local_dir)
+        if scratch == keep or not os.path.isfile(scratch):
+            return
+        if os.path.commonpath([scratch, root]) != root:
+            return
+        if os.path.getsize(scratch) != os.path.getsize(keep):
+            return
+        os.remove(scratch)
+        logger.info(f"Removed duplicate download cached at {scratch}")
+        # Walk up and drop directories the scratch file used to keep alive.
+        parent = os.path.dirname(scratch)
+        while parent and parent != root:
+            try:
+                os.rmdir(parent)  # fails unless genuinely empty
+            except OSError:
+                break
+            parent = os.path.dirname(parent)
+    except OSError as e:
+        logger.debug(f"Could not prune scratch file {scratch_path}: {e}")
+
+
 def _download_single_file(repo_id: str, filename: str, local_path: str) -> str:
     """Download a single file from a HF/ModelScope repo to a specific local path."""
     local_dir = os.path.dirname(local_path)
@@ -52,6 +83,11 @@ def _download_single_file(repo_id: str, filename: str, local_path: str) -> str:
                 shutil.copy2(downloaded_path, local_path)
             if not os.path.isfile(local_path):
                 raise RuntimeError(f"Downloaded file not found at expected path: {local_path}")
+            # The SDK mirrors the repo layout under local_dir, so a nested
+            # remote_file (e.g. "semantic_codec/model.safetensors") leaves a
+            # second identical copy behind that nothing ever reads again --
+            # _locate_snapshot only understands the HF ``models--x--y`` layout.
+            _prune_sdk_scratch_file(downloaded_path, local_path, local_dir)
             return local_path
         except Exception as e:
             logger.warning(
